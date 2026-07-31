@@ -2,20 +2,25 @@ import argparse
 import torch
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 
+import config
+
 # Global variables to cache model and processor
 _model = None
 _processor = None
 
-# Pin the VLM to its own card. JoyAI lives on a DIFFERENT card (see Models & Resources).
-# QWEN_DEVICE = "cuda:1"
+
+def _default_device() -> str:
+    """Resolve the default GPU card for the VLM from config."""
+    return config.QWEN_DEVICE or "cuda:0"
 
 
-def get_model_and_processor(use_flash_attn=False, device="cuda:1"):
+def get_model_and_processor(use_flash_attn=False, device=None):
     """Initializes and caches the Qwen3-VL model and processor."""
     global _model, _processor
 
     if _model is None or _processor is None:
-        model_id = "/remote-home/Zhangkaile/models/Qwen3-VL-32B-Instruct/"
+        device = device or _default_device()
+        model_id = config.QWEN_MODEL_ID
         print(f"Loading {model_id} on {device}...")
 
         # Always use bfloat16 to fit the 32B model in GPU memory (~64GB).
@@ -62,7 +67,7 @@ def Qwen3VL_inference(
     use_flash_attn=False,
     max_new_tokens=512,
     deterministic=True,
-    device="cuda:2",
+    device=None,
 ):
     """
     Runs inference on Qwen3-VL with one or MORE images and a text prompt.
@@ -145,6 +150,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=512, help="Maximum new tokens to generate.")
     parser.add_argument("--flash_attn", action="store_true", help="Enable Flash Attention 2.")
     parser.add_argument("--sample", action="store_true", help="Enable sampling (default is greedy).")
+    parser.add_argument("--device", type=str, default=None,
+                        help="GPU card, e.g. cuda:0 (default: from config or cuda:0).")
 
     args = parser.parse_args()
 
@@ -158,6 +165,7 @@ if __name__ == "__main__":
         use_flash_attn=args.flash_attn,
         max_new_tokens=args.max_tokens,
         deterministic=not args.sample,
+        device=args.device,
     )
 
     print("\n--- Model Response ---")

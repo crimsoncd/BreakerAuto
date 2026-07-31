@@ -3,11 +3,14 @@
 Layer Decomposition Pipeline — CLI entry point.
 
 Usage:
-    # Run on a single image with real models (requires 4×A100 GPUs)
+    # Run on a single image with real models (requires a multi-GPU box)
     python main.py --image images/009.png
 
     # Run in fake/stub mode for testing (no GPUs needed)
     python main.py --image images/009.png --fake
+
+    # Enable the per-element VLM verification loop
+    python main.py --image images/009.png --use_verify
 
     # Batch process all images in a directory
     python main.py --dir images/ --output runs
@@ -21,12 +24,12 @@ import sys
 import time
 from pathlib import Path
 
+from config import DEFAULT_OUTPUT_DIR
 from pipeline import run_pipeline
 
 
-
 def process_single(image_path: Path, output_dir: str, use_fake: bool,
-                   skip_verify: bool, skip_global: bool) -> dict:
+                   use_verify: bool, use_global: bool) -> dict:
     """Process one image through the decomposition pipeline."""
     print("\n" + "#" * 70)
     print(f"# IMAGE: {image_path.name}")
@@ -36,8 +39,8 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
         image_path=str(image_path),
         output_dir=output_dir,
         use_fake=use_fake,
-        skip_verify=skip_verify,
-        skip_global=skip_global
+        use_verify=use_verify,
+        use_global=use_global,
     )
 
     print(f"\n  Run dir:        {result['run_dir']}")
@@ -50,7 +53,7 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
 
 
 def process_batch(image_dir: Path, output_dir: str, use_fake: bool,
-                  skip_verify: bool, skip_global: bool) -> dict:
+                  use_verify: bool, use_global: bool) -> dict:
     """Process all images in a directory."""
     image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
     image_files = sorted([
@@ -71,7 +74,7 @@ def process_batch(image_dir: Path, output_dir: str, use_fake: bool,
     for i, img_path in enumerate(image_files):
         print(f"\n[{i + 1}/{len(image_files)}]")
         try:
-            result = process_single(img_path, output_dir, use_fake, skip_verify, skip_global)
+            result = process_single(img_path, output_dir, use_fake, use_verify, use_global)
             results.append({"image": img_path.name, "status": "ok", "result": result})
         except Exception as e:
             print(f"  ERROR processing {img_path.name}: {e}")
@@ -103,20 +106,20 @@ def main():
         help="Directory containing multiple images to process"
     )
     parser.add_argument(
-        "--output", type=str, default="runs",
-        help="Output directory for run folders (default: runs)"
+        "--output", type=str, default=DEFAULT_OUTPUT_DIR,
+        help=f"Output directory for run folders (default: {DEFAULT_OUTPUT_DIR})"
     )
     parser.add_argument(
         "--fake", action="store_true",
         help="Run in fake/stub mode without real model calls"
     )
     parser.add_argument(
-        "--skip_verify", action="store_true",
-        help="Skip middle verify of cropped and cleaned elements."
+        "--use_verify", action="store_true",
+        help="Enable VLM verification of each extracted element (default: skipped for speed)."
     )
     parser.add_argument(
-        "--skip_global", action="store_true",
-        help="Skip middle verify of cropped and cleaned elements."
+        "--use_global", action="store_true",
+        help="Enable the final global reconstruction verification loop (default: skipped for speed)."
     )
     args = parser.parse_args()
 
@@ -130,7 +133,7 @@ def main():
             print(f"ERROR: Image not found: {image_path}")
             sys.exit(1)
         process_single(image_path, args.output, use_fake=args.fake,
-                       skip_verify=args.skip_verify, skip_global=args.skip_global)
+                       use_verify=args.use_verify, use_global=args.use_global)
         print("\nDone.")
         return
 
@@ -141,7 +144,7 @@ def main():
             print(f"ERROR: Directory not found: {image_dir}")
             sys.exit(1)
         process_batch(image_dir, args.output, use_fake=args.fake,
-                       skip_verify=args.skip_verify, skip_global=args.skip_global)
+                      use_verify=args.use_verify, use_global=args.use_global)
         print("\nDone.")
         return
 

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import traceback
 from pathlib import Path
-from typing import Optional
 
 from PIL import Image
 
@@ -32,6 +31,7 @@ from config import (
     MAX_ENUM_REOPENINGS, MAX_ELEMENTS, BBOX_NORM,
     JOYAI_BASE_SEED,
     VLM_MAX_TOKENS_PLANNER, VLM_MAX_TOKENS_CHECKER, VLM_MAX_TOKENS_PROMPT_WRITER,
+    DEFAULT_OUTPUT_DIR,
 )
 from prompts import (
     PLANNER_PROMPT,
@@ -200,7 +200,7 @@ def _verify_element(element: Element, original_crop: Image.Image,
     )
 
 
-def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, skip_verify: bool) -> None:
+def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_verify: bool) -> None:
     """Stage 2: Full element extraction pipeline with retry loop."""
     print(f"\n  --- Extracting: {element.name} (id={element.id}) ---")
     element.status = ElementStatus.EXTRACTING
@@ -261,9 +261,9 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, skip
         rgba_resized = resize_layer_to_bbox(rgba_layer, element.bbox, w, h)
 
         # Step 6: Verify
-        if skip_verify:
-            print("Skipping verifcation...")
-            verification = {"ok": True, "defects":None, "notes":None}
+        if not use_verify:
+            print("Skipping verification...")
+            verification = {"ok": True, "defects": None, "notes": None}
         else:
             verification = _verify_element(element, crop_img, rgba_resized, logger)
         ok = verification.get("ok", False)
@@ -308,7 +308,7 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, skip
     logger.save_scene_graph(graph, f"stage2_after_{element.name}")
 
 
-def run_stage2(graph: SceneGraph, logger: RunLogger, skip_verify: bool) -> None:
+def run_stage2(graph: SceneGraph, logger: RunLogger, use_verify: bool) -> None:
     """Stage 2: Process all elements front-to-back by depth_rank."""
     print("\n" + "=" * 60)
     print("STAGE 2 — ELEMENT EXTRACTION")
@@ -318,7 +318,7 @@ def run_stage2(graph: SceneGraph, logger: RunLogger, skip_verify: bool) -> None:
     sorted_els = graph.sorted_elements()
     for i, element in enumerate(sorted_els):
         print(f"\n[{i + 1}/{len(sorted_els)}] Element: {element.name} (depth={element.depth_rank})")
-        extract_element(element, graph, logger, skip_verify)
+        extract_element(element, graph, logger, use_verify)
 
 
 # ---------------------------------------------------------------------------
@@ -493,10 +493,10 @@ def reassemble(graph: SceneGraph, logger: RunLogger) -> Image.Image:
 
 
 def global_verify(graph: SceneGraph, reconstruction: Image.Image,
-                  logger: RunLogger, skip_global: bool) -> dict:
+                  logger: RunLogger, use_global: bool) -> dict:
     """Stage 4, step 2: Global verification."""
 
-    if skip_global:
+    if not use_global:
         print("Skipping global check...")
         skipped_dict = {
                         "ok": True,
@@ -536,7 +536,8 @@ def global_verify(graph: SceneGraph, reconstruction: Image.Image,
     )
 
 
-def apply_routing(verdict: dict, graph: SceneGraph, logger: RunLogger) -> bool:
+def apply_routing(verdict: dict, graph: SceneGraph, logger: RunLogger,
+                  use_verify: bool) -> bool:
     """Stage 4, step 3: Apply the verifier's routing decisions.
 
     Returns True if any action was taken (pipeline should loop), False otherwise.
@@ -561,7 +562,7 @@ def apply_routing(verdict: dict, graph: SceneGraph, logger: RunLogger) -> bool:
             graph.enum_reopenings += 1
             print(f"  Added missing element: {new_el.name} id={new_el.id}")
             # Extract it immediately
-            extract_element(new_el, graph, logger)
+            extract_element(new_el, graph, logger, use_verify)
             action_taken = True
 
     # 2. Handle bad layers — re-run that element's Stage 2
@@ -574,7 +575,7 @@ def apply_routing(verdict: dict, graph: SceneGraph, logger: RunLogger) -> bool:
             print(f"  Re-running bad layer: {name} defects={defects}")
             el.defects = defects
             el.status = ElementStatus.EXTRACTING
-            extract_element(el, graph, logger)
+            extract_element(el, graph, logger, use_verify)
             action_taken = True
 
     # 3. Handle z-order
@@ -595,7 +596,8 @@ def apply_routing(verdict: dict, graph: SceneGraph, logger: RunLogger) -> bool:
     return action_taken
 
 
-def run_stage4(graph: SceneGraph, logger: RunLogger, skip_global: bool) -> bool:
+def run_stage4(graph: SceneGraph, logger: RunLogger, use_global: bool,
+               use_verify: bool = False) -> bool:
     """Stage 4: Reassembly + global verification master loop.
 
     Returns True if final result is acceptable, False if budget exhausted.
@@ -605,7 +607,7 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, skip_global: bool) -> bool:
         print(f"\n  --- Global attempt {graph.global_attempts}/{GLOBAL_ATTEMPTS} ---")
 
         recon = reassemble(graph, logger)
-        verdict = global_verify(graph, recon, logger, skip_global)
+        verdict = global_verify(graph, recon, logger, use_global)
 
         ok = verdict.get("ok", False)
         notes = verdict.get("notes", "")
@@ -620,7 +622,7 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, skip_global: bool) -> bool:
             return True
 
         # Apply routing
-        action_taken = apply_routing(verdict, graph, logger)
+        action_taken = apply_routing(verdict, graph, logger, use_verify)
         if not action_taken:
             print("\n  >>> NO ROUTING ACTIONS — terminating loop")
             break
@@ -662,14 +664,19 @@ def ship(graph: SceneGraph, logger: RunLogger) -> dict:
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
-def run_pipeline(image_path: str | Path, output_dir: str = "runs",
-                 use_fake: bool = False, skip_verify: bool = False, skip_global: bool = False) -> dict:
+def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
+                 use_fake: bool = False, use_verify: bool = False,
+                 use_global: bool = False) -> dict:
     """Run the full layer decomposition pipeline on one image.
 
     Args:
         image_path: path to the illustration image.
         output_dir: where to write the run folder.
         use_fake: if True, use stubs for VLM and JoyAI (testing only).
+        use_verify: if True, run the VLM verification loop on each extracted
+            element cutout (slower, higher quality).
+        use_global: if True, run the final global reconstruction verification
+            and re-routing loop.
 
     Returns:
         dict with paths to all outputs.
@@ -682,11 +689,11 @@ def run_pipeline(image_path: str | Path, output_dir: str = "runs",
     if not use_fake:
         device1, device2 = pipeline_tools.auto_detect_gpu_devices()
 
-    if skip_verify:
-        print("Using skipping verification after cleaned cropped image.")
+    if use_verify:
+        print("Element verification ENABLED — VLM checks each extracted cutout.")
 
-    if skip_global:
-        print("Using skipping global recheck.")
+    if use_global:
+        print("Global verification ENABLED — final reconstruction is re-checked.")
 
     # Derive image prefix from basename (e.g. "009" from "009.png")
     image_stem = Path(image_path).stem
@@ -703,13 +710,13 @@ def run_pipeline(image_path: str | Path, output_dir: str = "runs",
             graph.background.image_path = image_path  # use original as bg fallback
         else:
             # Stage 2
-            run_stage2(graph, logger, skip_verify)
+            run_stage2(graph, logger, use_verify)
 
             # Stage 3
             extract_background(graph, logger)
 
         # Stage 4
-        run_stage4(graph, logger, skip_global)
+        run_stage4(graph, logger, use_global, use_verify)
 
         # Ship
         result = ship(graph, logger)

@@ -13,9 +13,9 @@ that other code can run image editing / text-to-image generation directly:
         device='cuda:1',          # keep OFF the card Qwen3VL occupies
     )
 
-The checkpoint defaults to DEFAULT_CKPT_ROOT
-('/remote-home/Zhangkaile/models/JoyAI-Image-Edit/'); pass ckpt_root=...
-to override.
+The checkpoint defaults to config.JOYAI_CKPT_ROOT and the source repo to
+config.JOYAI_SRC_DIR (its ``src`` folder is put on ``sys.path``); pass
+ckpt_root=... to override per call.
 
 The heavy model is built lazily on the first call and cached per
 (ckpt_root, config, device) so repeated calls are cheap. Prompt rewriting and
@@ -24,22 +24,23 @@ multi-GPU/FSDP are intentionally not supported here.
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union
 
 import torch
 from PIL import Image
+
+import config
 
 # ---------------------------------------------------------------------------
 # Path setup (mirrors JoyAI-inference.py so `infer_runtime` / `modules`
 # resolve when this file lives next to the original script).
 # ---------------------------------------------------------------------------
-TARGET_SRC_DIR = '/remote-home/Zhangkaile/dev/JoyAI-Image/src'
+TARGET_SRC_DIR = str(Path(config.JOYAI_SRC_DIR) / "src")
 
 if TARGET_SRC_DIR not in sys.path:
     sys.path.insert(0, TARGET_SRC_DIR)
@@ -49,10 +50,11 @@ warnings.filterwarnings('ignore')
 ImageLike = Union[str, Path, Image.Image, None]
 
 # Default checkpoint location (override per-call via ckpt_root=...)
-DEFAULT_CKPT_ROOT = '/remote-home/Zhangkaile/models/JoyAI-Image-Edit/'
+DEFAULT_CKPT_ROOT = config.JOYAI_CKPT_ROOT
 
-# Default card for JoyAI. MUST differ from the VLM's card (Qwen is on cuda:0).
-DEFAULT_DEVICE = 'cuda:2'
+# Default card for JoyAI. MUST differ from the VLM's card when both models run
+# together. Set config.JOYAI_DEVICE (or the JOYAI_DEVICE env var) to change it.
+DEFAULT_DEVICE = config.JOYAI_DEVICE or 'cuda:0'
 
 
 # ---------------------------------------------------------------------------
@@ -186,9 +188,10 @@ def JoyEdit(image: ImageLike,
             returned in memory.
         ckpt_root: checkpoint root directory (required, keyword-friendly).
         config: optional config path (defaults to <ckpt_root>/infer_config.py).
-        device: which GPU to run on, e.g. 'cuda:1'. Defaults to DEFAULT_DEVICE
-            (cuda:1) so JoyAI stays OFF the VLM's card. Only used when `model`
-            is built here (ignored if a pre-built `model` is passed).
+        device: which GPU to run on, e.g. 'cuda:1'. Defaults to
+            config.JOYAI_DEVICE so JoyAI stays OFF the VLM's card. Only used
+            when `model` is built here (ignored if a pre-built `model` is
+            passed).
         height / width: output size, only used for text-to-image.
         steps, guidance_scale, seed, neg_prompt, basesize: sampler params.
             NOTE on retries: bump `seed` per attempt — re-running the same prompt
@@ -344,7 +347,7 @@ if __name__ == '__main__':
     parser.add_argument('--prompt', required=True)
     parser.add_argument('--image')
     parser.add_argument('--output', default='example.png')
-    parser.add_argument('--device', default=None, help="e.g. cuda:1 (defaults to cuda:1)")
+    parser.add_argument('--device', default=None, help="e.g. cuda:1 (defaults to config.JOYAI_DEVICE)")
     parser.add_argument('--steps', type=int, default=30)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()

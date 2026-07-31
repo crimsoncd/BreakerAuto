@@ -8,7 +8,12 @@ Each model is ~80G-class; two cannot share one card without OOM. But you have **
 
 Both models stay loaded for the whole run. The two spare cards are reserved for the obvious phase-2 win: a **second JoyAI worker** to parallelize element extraction (elements within one depth tier are independent, and the JoyAI generate is the bottleneck). The VLM does not need a second copy.
 
-The wrappers now pin this by default: `QWEN_DEVICE = "cuda:0"` in the Qwen wrapper, `DEFAULT_DEVICE = "cuda:1"` in the JoyAI wrapper. Whenever before running a process, check the state of two GPU. You can use another available GPUs and you can modify your codes according to it.
+The wrappers now take their device assignments from `config.py`
+(`QWEN_DEVICE` / `JOYAI_DEVICE`), which can also be overridden with the
+`QWEN_DEVICE` / `JOYAI_DEVICE` environment variables; if neither is set, the
+pipeline auto-detects the two cards with the most free memory at startup.
+Whenever before running a process, check the state of two GPU. You can use
+another available GPUs and you can modify your codes according to it.
 
 
 ## Calling conventions

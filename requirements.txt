@@ -1,0 +1,47 @@
+# -----------------------------------------------------------------------------
+# Layer-decomposition pipeline dependencies.
+#
+# PREREQUISITE: make the JoyAI-Image package available first. It provides
+# `infer_runtime` / `modules` (imported by call_JoyAI.py) and is NOT on PyPI.
+# Either build & install it:
+#
+#     pip install /path/to/JoyAI-Image        # builds joyai-image-release
+#
+# ...or set JOYAI_SRC_DIR to a JoyAI-Image clone and the pipeline adds its
+# `src/` to sys.path itself (no build step needed).
+#
+# The pins below match JoyAI's pyproject.toml (torch==2.8.0, diffusers==0.36.0,
+# transformers>=4.57.0,<4.58.0) so one `pip install -r requirements.txt` yields
+# a consistent environment. Our Qwen3-VL calls (torch + transformers) are a
+# subset of what JoyAI already needs; numpy / qwen-vl-utils / rembg are the
+# pipeline-specific extras.
+# -----------------------------------------------------------------------------
+
+# --- Shared with JoyAI (pinned to its pyproject.toml) ---
+accelerate
+diffusers==0.36.0
+einops
+loguru
+packaging
+pillow
+safetensors
+sentencepiece
+torch==2.8.0
+torchvision
+transformers>=4.57.0,<4.58.0
+
+# --- Pipeline-specific extras ---
+numpy
+qwen-vl-utils
+rembg
+
+# --- Optional, only if you enable the corresponding feature ---
+# Long-lived model server described in MODELS_AND_RESOURCES.md (phase-2 win):
+# fastapi
+# uvicorn
+# Prompt rewriting support:
+# openai
+
+# NOTE: JoyAI also declares `kernels` (private CUDA kernels) and `pydantic`,
+# `requests`. They ship with / are resolved during the JoyAI build itself, so
+# they are not listed here.

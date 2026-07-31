@@ -22,31 +22,36 @@ from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image
 
 from call_Qwen3VL import Qwen3VL_inference
 from call_JoyAI import JoyEdit
-from config import BBOX_NORM, JOYAI_BASE_SEED
+from config import (
+    BBOX_NORM, JOYAI_BASE_SEED,
+    QWEN_DEVICE as _QWEN_DEVICE,
+    JOYAI_DEVICE as _JOYAI_DEVICE,
+)
 
 import rembg
 
-# Runtime-resolved device assignments
-# QWEN_DEVICE = _QWEN_DEFAULT
-# JOYAI_DEVICE = "cuda:2"
+# Device assignments. Seeded from config; resolved at runtime by
+# auto_detect_gpu_devices() when both are None.
+QWEN_DEVICE, JOYAI_DEVICE = _QWEN_DEVICE, _JOYAI_DEVICE
 
-# global QWEN_DEVICE, JOYAI_DEVICE
-
-QWEN_DEVICE, JOYAI_DEVICE = None, None
-# GPU_SET = False
 
 def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> tuple[str, str]:
     """Detect free GPUs and assign VLM to one, JoyAI to another.
 
     Strategy: Query `nvidia-smi` for free memory. Pick the two cards with
-    the most available memory as candidates.
+    the most available memory as candidates. Config/env device values
+    (config.QWEN_DEVICE / config.JOYAI_DEVICE) always win over detection.
     """
 
     global QWEN_DEVICE, JOYAI_DEVICE
+
+    # Config/env values take precedence over auto-detection.
+    force_qwen = force_qwen or _QWEN_DEVICE
+    force_joyai = force_joyai or _JOYAI_DEVICE
 
     if QWEN_DEVICE is not None and JOYAI_DEVICE is not None:
         print("Using current devices")
@@ -64,15 +69,15 @@ def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> 
         import torch
         if not torch.cuda.is_available():
             print("[GPU] No CUDA available — using CPU fallback")
-            QWEN_DEVICE = "cpu"
-            JOYAI_DEVICE = "cpu"
+            QWEN_DEVICE = force_qwen or "cpu"
+            JOYAI_DEVICE = force_joyai or "cpu"
             return QWEN_DEVICE, JOYAI_DEVICE
 
         n_gpus = torch.cuda.device_count()
         if n_gpus < 2:
             print(f"[GPU] Only {n_gpus} GPU(s) detected — both models on cuda:0")
-            QWEN_DEVICE = "cuda:0"
-            JOYAI_DEVICE = "cuda:0"
+            QWEN_DEVICE = force_qwen or "cuda:0"
+            JOYAI_DEVICE = force_joyai or "cuda:0"
             return QWEN_DEVICE, JOYAI_DEVICE
 
         # Query nvidia-smi for utilization and memory
@@ -90,8 +95,8 @@ def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> 
             if len(parts) >= 4:
                 idx = int(parts[0])
                 
-                # 如果设置了 CUDA_VISIBLE_DEVICES，物理索引可能大于 torch 的可用数量
-                # 为了防止报错，如果索引超出了 torch 的检测范围，这里做个安全过滤
+                # If CUDA_VISIBLE_DEVICES is set, the physical index may exceed
+                # what torch sees. Filter out such indices safely.
                 if idx >= n_gpus:
                     continue
                     
@@ -102,48 +107,43 @@ def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> 
                 
                 gpu_stats.append((idx, util, mem_free))
 
-        # 核心改动：优先按照【剩余显存】从大到小排序 (x[2]降序)，如果剩余一样，再看【利用率】从小到大 (x[1]升序)
+        # Sort by most free memory first, then lowest utilization.
         gpu_stats.sort(key=lambda x: (-x[2], x[1]))
 
-        # 如果过滤后找不到足够的卡，降级处理
+        # Degrade gracefully if no usable cards remain after filtering.
         if not gpu_stats:
             raise RuntimeError("No matching GPUs found after filtering.")
 
         if len(gpu_stats) >= 2:
             vlm_idx = gpu_stats[0][0]
             joyai_idx = gpu_stats[1][0]
-            vlm_util = gpu_stats[0][1]
-            joyai_util = gpu_stats[1][1]
         else:
             vlm_idx = gpu_stats[0][0]
             joyai_idx = gpu_stats[0][0]
-            vlm_util = gpu_stats[0][1]
-            joyai_util = gpu_stats[0][1]
 
         QWEN_DEVICE = f"cuda:{vlm_idx}"
         JOYAI_DEVICE = f"cuda:{joyai_idx}"
-        
-        print(f"[GPU] Auto-detected: VLM={QWEN_DEVICE} (util={vlm_util:.0f}%), "
-              f"JoyAI={JOYAI_DEVICE} (util={joyai_util:.0f}%)")
 
-        # 反射同步到目标模块
-        try:
-            import call_Qwen3VL
-            call_Qwen3VL.QWEN_DEVICE = QWEN_DEVICE
-        except ImportError:
-            print("[GPU] Warning: call_Qwen3VL module not found, skip variable sync.")
+        # Config/env explicit assignments win over auto-detection.
+        if force_qwen:
+            QWEN_DEVICE = force_qwen
+        if force_joyai:
+            JOYAI_DEVICE = force_joyai
+        
+        print(f"[GPU] Auto-detected: VLM={QWEN_DEVICE}, JoyAI={JOYAI_DEVICE}")
 
         print("Using Device:")
         print("Qwen:", QWEN_DEVICE)
         print("JoyAI:", JOYAI_DEVICE)
 
     except Exception as e:
-        # 如果全局变量未定义，设定安全兜底值
-        if 'QWEN_DEVICE' not in globals(): QWEN_DEVICE = "cuda:2"
-        if 'JOYAI_DEVICE' not in globals(): JOYAI_DEVICE = "cuda:3"
+        # Safe fallback if detection fails.
+        if QWEN_DEVICE is None:
+            QWEN_DEVICE = force_qwen or "cuda:0"
+        if JOYAI_DEVICE is None:
+            JOYAI_DEVICE = force_joyai or "cuda:0"
         print(f"[GPU] Error occurred ({e}) — fallback to defaults QWEN={QWEN_DEVICE} JOYAI={JOYAI_DEVICE}")
 
-    GPU_SET = True
     return QWEN_DEVICE, JOYAI_DEVICE
 
 

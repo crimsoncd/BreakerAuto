@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import json
@@ -157,11 +158,21 @@ def process_dataset(input_dir, output_root, collection_code):
     print("\nDataset cleaning and sorting completed successfully!")
 
 if __name__ == "__main__":
-    # --- CONFIGURATION ---
-    # Change these paths and code to match your execution environment
-    INPUT_DIRECTORY = "/remote-home/Zhangkaile/dev/AutoTask/AutoAgentRaw/runsreal/Guxiaoyu-DoubleSkip-2/"
-    OUTPUT_ROOT_DIR = "/remote-home/Zhangkaile/dev/AutoTask/AutoAgentRaw/cleaned/"
-    COLLECTION_CODE = "C"
-    # ---------------------
-    
-    process_dataset(INPUT_DIRECTORY, OUTPUT_ROOT_DIR, COLLECTION_CODE)
+    parser = argparse.ArgumentParser(
+        description="Sort layer-decomposition run folders into a cleaned dataset."
+    )
+    parser.add_argument(
+        "--input", required=True,
+        help="Directory containing run folders, e.g. runsreal/<collection>/"
+    )
+    parser.add_argument(
+        "--output", required=True,
+        help="Root directory to write the cleaned dataset into"
+    )
+    parser.add_argument(
+        "--code", default="C",
+        help="Collection code prefix (default: C). Folders are renamed to e.g. C000."
+    )
+    args = parser.parse_args()
+
+    process_dataset(args.input, args.output, args.code)
