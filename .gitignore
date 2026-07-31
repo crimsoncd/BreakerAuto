@@ -3,4 +3,6 @@ __pycache__
 logs/
 runs/
 runsreal/
+reconstruction/
 
+cleaned/
