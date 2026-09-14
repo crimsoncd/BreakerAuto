@@ -33,7 +33,7 @@ MAX_ELEMENTS = 20
 # VLM configuration (Qwen3-VL)
 # ---------------------------------------------------------------------------
 # Local model directory or a HuggingFace repo id. Env: QWEN_MODEL_ID
-QWEN_MODEL_ID = _from_env("QWEN_MODEL_ID", "Qwen/Qwen3-VL-32B-Instruct")
+QWEN_MODEL_ID = _from_env("QWEN_MODEL_ID", "/remote-home/Zhangkaile/models/Qwen3-VL-32B-Instruct/")
 
 # GPU card for the VLM, e.g. "cuda:0". Leave None to auto-detect the freest
 # card at runtime. Env: QWEN_DEVICE
@@ -48,11 +48,11 @@ VLM_MAX_TOKENS_PROMPT_WRITER = 512
 # JoyAI configuration (image edit model)
 # ---------------------------------------------------------------------------
 # Checkpoint root for the JoyAI image-edit model. Env: JOYAI_CKPT_ROOT
-JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "models/JoyAI-Image-Edit/")
+JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit/")
 
 # Root of the JoyAI-Image source repository. Its `src` subdirectory is added
 # to sys.path so `infer_runtime` / `modules` resolve. Env: JOYAI_SRC_DIR
-JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "path/to/JoyAI-Image")
+JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "/remote-home/Zhangkaile/dev/JoyAI-Image")
 
 # GPU card for JoyAI, e.g. "cuda:1". Leave None to auto-detect the freest
 # card at runtime. MUST be a different card than the VLM when both models run
