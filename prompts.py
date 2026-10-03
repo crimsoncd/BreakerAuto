@@ -158,3 +158,23 @@ Return STRICT JSON:
 ok = true ONLY if the reconstruction would convince a human it is the same scene as ORIGINAL, with all objects present and correctly layered. Prefer reporting a real problem over passing a flawed reconstruction, but do not invent objects that are not in ORIGINAL."""
 
 GLOBAL_VERIFIER_TEXT = "Compare the ORIGINAL (first image) with the RECONSTRUCTION (second image). Report what is wrong and how to fix it."
+
+
+# ---------------------------------------------------------------------------
+# P8 — Layout Describer (dataset metadata, one joint call)
+# ---------------------------------------------------------------------------
+DESCRIBER_PROMPT = """You are a scene describer building metadata for an illustration layer-decomposition dataset. You see TWO images:
+1. ORIGINAL: the source illustration.
+2. BACKGROUND: the extracted background layer — every listed foreground object has already been removed and the revealed area filled.
+
+Layout items: {element_summaries}
+(item order is the compositing order: order 0 is the background drawn at the bottom, higher orders are drawn later, i.e. closer to the viewer; bboxes are normalized to 0~1000)
+
+Write concise, factual text:
+- "description": 2-3 sentences about the ORIGINAL illustration — main content, composition, overall style.
+- "background": a "name" (short noun phrase for the background layer alone, e.g. "blue ocean background") and a "description" (ONE sentence describing image 2 as it actually appears: the background WITHOUT any of the listed foreground objects — never mention a listed object in it).
+- "global_style": "color_scheme" (e.g. "Blue-Green tones") and "mood" (e.g. "Dynamic and vibrant"), each only a few words.
+- "elements": ONE entry per layout item above, echoing its name EXACTLY as given, describing the object as seen in the ORIGINAL image. Each description is ONE sentence, at most 25 words: the object's visual appearance and its position in the scene (relative to other items). No lists, no repetition of the bbox.
+
+Return STRICT JSON:
+{"description":"...","background":{"name":"...","description":"..."},"global_style":{"color_scheme":"...","mood":"..."},"elements":[{"name":"<exact name from the list>","description":"..."}, ...]}"""

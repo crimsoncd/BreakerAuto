@@ -1,35 +1,16 @@
-from openai import OpenAI
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Configured by environment variables
-client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+model_id = "/remote-home/Zhangkaile/models/Qwen3.8-27B"
 
-messages = [
-    {
-        "role": "user",
-        "content": [
-            # {
-            #     "type": "image_url",
-            #     "image_url": {
-            #         "url": "https://qianwen-res.oss-accelerate.aliyuncs.com/Qwen3.5/demo/RealWorld/RealWorld-04.png"
-            #     }
-            # },
-            {
-                "type": "text",
-                "text": "What is the side effect of drug aspirin?"
-            }
-        ]
-    }
-]
-
-chat_response = client.chat.completions.create(
-    model="Qwen3.8-27B",
-    messages=messages,
-    temperature=0.7,
-    top_p=0.8,
-    presence_penalty=1.5,
-    extra_body={
-        "top_k": 20,
-        "chat_template_kwargs": {"enable_thinking": False},
-    }, 
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForCausalLM.from_pretrained(
+    model_id, 
+    device_map="auto", 
+    torch_dtype="auto"
 )
-print("Chat response:", chat_response)
+
+text = "Hello, how does Qwen3.8 work?"
+inputs = tokenizer(text, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=65536)
+print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+

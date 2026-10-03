@@ -41,6 +41,7 @@ class Element:
     status: ElementStatus = ElementStatus.PLANNED
     attempts: int = 0
     defects: list[str] = field(default_factory=list)
+    description: Optional[str] = None          # short one-sentence item description (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
@@ -54,6 +55,7 @@ class Element:
             "status": self.status.value,
             "attempts": self.attempts,
             "defects": self.defects,
+            "description": self.description,
         }
 
     @classmethod
@@ -69,6 +71,7 @@ class Element:
             status=ElementStatus(d.get("status", "planned")),
             attempts=d.get("attempts", 0),
             defects=d.get("defects", []),
+            description=d.get("description"),
         )
 
 
@@ -81,6 +84,8 @@ class Background:
     status: BackgroundStatus = BackgroundStatus.PLANNED
     attempts: int = 0
     defects: list[str] = field(default_factory=list)
+    name: Optional[str] = None                 # short noun phrase for the background (dataset metadata)
+    description: Optional[str] = None          # one-sentence background description (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +94,8 @@ class Background:
             "status": self.status.value,
             "attempts": self.attempts,
             "defects": self.defects,
+            "name": self.name,
+            "description": self.description,
         }
 
     @classmethod
@@ -99,6 +106,8 @@ class Background:
             status=BackgroundStatus(d.get("status", "planned")),
             attempts=d.get("attempts", 0),
             defects=d.get("defects", []),
+            name=d.get("name"),
+            description=d.get("description"),
         )
 
 
@@ -112,6 +121,8 @@ class SceneGraph:
     elements: list[Element] = field(default_factory=list)
     global_attempts: int = 0
     enum_reopenings: int = 0                # count of Stage-1 reopenings
+    image_description: Optional[str] = None  # overall scene description (dataset metadata)
+    global_style: Optional[dict] = None      # {color_scheme, mood} (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
@@ -121,6 +132,8 @@ class SceneGraph:
             "elements": [e.to_dict() for e in self.elements],
             "global_attempts": self.global_attempts,
             "enum_reopenings": self.enum_reopenings,
+            "image_description": self.image_description,
+            "global_style": self.global_style,
         }
 
     @classmethod
@@ -134,6 +147,8 @@ class SceneGraph:
             elements=elements,
             global_attempts=d.get("global_attempts", 0),
             enum_reopenings=d.get("enum_reopenings", 0),
+            image_description=d.get("image_description"),
+            global_style=d.get("global_style"),
         )
 
     def save(self, path: str | Path) -> None:

@@ -44,6 +44,8 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
     )
 
     print(f"\n  Run dir:        {result['run_dir']}")
+    if result.get("package_dir"):
+        print(f"  Package:        {result['package_dir']}")
     print(f"  Reconstruction: {result['reconstruction']}")
     print(f"  Elements:       {len(result['elements'])}")
     done = sum(1 for e in result["elements"] if e["status"] == "done")

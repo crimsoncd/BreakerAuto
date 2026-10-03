@@ -460,6 +460,23 @@ def set_fake_mode(on: bool = True) -> None:
 def _fake_vlm(system_prompt: str, image_input, user_text: str,
               max_new_tokens: int = 512, logger=None) -> str:
     """Stub VLM that returns canned JSON."""
+    # Layout describer — must be checked first: its prompt mentions several
+    # phrases shared with other roles (background, foreground objects).
+    if "scene describer" in system_prompt.lower():
+        # Element names arrive inside the {element_summaries} JSON payload.
+        names = re.findall(r'"name":\s*"([^"]+)"', system_prompt)
+        return json.dumps({
+            "description": "A flat-style illustration of a simple outdoor scene: a girl stands on a grassy field beside a tree under a bright open sky.",
+            "background": {
+                "name": "bright sky and open field",
+                "description": "A plain outdoor backdrop with soft sky tones above an empty grassy field and no foreground objects.",
+            },
+            "global_style": {"color_scheme": "Bright natural tones", "mood": "Calm and cheerful"},
+            "elements": [
+                {"name": n, "description": f"The {n.replace('_', ' ')} placed in the scene."}
+                for n in names
+            ],
+        })
     # Return different canned responses based on what the system prompt contains
     if "scene analyst" in system_prompt.lower():
         return json.dumps({

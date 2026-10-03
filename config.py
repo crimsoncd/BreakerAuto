@@ -43,6 +43,7 @@ VLM_SYSTEM_PROMPT = ""  # filled per role
 VLM_MAX_TOKENS_PLANNER = 1500
 VLM_MAX_TOKENS_CHECKER = 256
 VLM_MAX_TOKENS_PROMPT_WRITER = 512
+VLM_MAX_TOKENS_DESCRIBER = 1500
 
 # ---------------------------------------------------------------------------
 # JoyAI configuration (image edit model)

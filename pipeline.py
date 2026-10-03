@@ -17,6 +17,7 @@ Control flow:
 from __future__ import annotations
 
 import json
+import shutil
 import traceback
 from pathlib import Path
 
@@ -31,6 +32,7 @@ from config import (
     MAX_ENUM_REOPENINGS, MAX_ELEMENTS, BBOX_NORM,
     JOYAI_BASE_SEED,
     VLM_MAX_TOKENS_PLANNER, VLM_MAX_TOKENS_CHECKER, VLM_MAX_TOKENS_PROMPT_WRITER,
+    VLM_MAX_TOKENS_DESCRIBER,
     DEFAULT_OUTPUT_DIR,
 )
 from prompts import (
@@ -41,6 +43,7 @@ from prompts import (
     BACKGROUND_PROMPT_WRITER_PROMPT,
     BACKGROUND_VERIFIER_PROMPT, BACKGROUND_VERIFIER_TEXT,
     GLOBAL_VERIFIER_PROMPT, GLOBAL_VERIFIER_TEXT,
+    DESCRIBER_PROMPT,
 )
 from logger import RunLogger
 import pipeline_tools
@@ -634,6 +637,181 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, use_global: bool,
 
 
 # ---------------------------------------------------------------------------
+# Dataset package — descriptions + order-labelled export
+# ---------------------------------------------------------------------------
+def compute_orders(graph: SceneGraph) -> list[tuple[int, Element]]:
+    """Assign compositing orders to elements: 1..N, back-to-front.
+
+    Order mirrors target.json: background is order 0 (implicit here), higher
+    order = drawn later = closer to the viewer. depth_rank 1 is frontmost, so
+    back-to-front is descending depth_rank; ties keep planner enumeration order.
+    Only elements whose layer file exists on disk are numbered, so the layout
+    always matches the layers actually exported.
+    """
+    ready = [
+        e for e in graph.elements
+        if e.layer_path and Path(e.layer_path).exists()
+    ]
+    ready.sort(key=lambda e: -e.depth_rank)
+    return list(enumerate(ready, start=1))
+
+
+def describe(graph: SceneGraph, logger: RunLogger) -> None:
+    """One joint VLM call filling all dataset descriptions.
+
+    Produces: overall image description, background name+description,
+    global_style, and a short per-element description — the metadata of
+    target.json. Matched to elements by exact name.
+    """
+    print("\n" + "=" * 60)
+    print("DESCRIBING LAYOUT ITEMS")
+    print("=" * 60)
+
+    ordered = compute_orders(graph)
+    element_summaries = [
+        {"order": order, "name": el.name, "bbox": el.bbox}
+        for order, el in ordered
+    ]
+    system_prompt = DESCRIBER_PROMPT.replace(
+        "{element_summaries}", json.dumps(element_summaries))
+    user_text = ("FIRST image is the original illustration; SECOND image is the "
+                 "extracted background layer. Describe this illustration and its "
+                 "layout items.")
+
+    original_img = Image.open(graph.image_path)
+    # Second image = the extracted background, so its description matches the
+    # layer actually exported (foregrounds already removed) instead of guessing.
+    bg_file = graph.background.image_path
+    if bg_file and Path(bg_file).exists() and Path(bg_file) != Path(graph.image_path):
+        image_input = [original_img, Image.open(bg_file)]
+    else:
+        image_input = original_img
+
+    if pipeline_tools.FAKE_MODE:
+        response_text = pipeline_tools._fake_vlm(system_prompt, image_input, user_text)
+        result = parse_json_relaxed(response_text) or {}
+    else:
+        result = vlm_json(
+            system_prompt=system_prompt,
+            image_input=image_input,
+            user_text=user_text,
+            max_new_tokens=VLM_MAX_TOKENS_DESCRIBER,
+            role="describer",
+            logger=logger,
+        )
+
+    graph.image_description = result.get("description") or ""
+
+    bg_info = result.get("background") or {}
+    graph.background.name = bg_info.get("name") or "background"
+    graph.background.description = bg_info.get("description") or ""
+
+    style = result.get("global_style") or {}
+    graph.global_style = {
+        "color_scheme": style.get("color_scheme") or "",
+        "mood": style.get("mood") or "",
+    }
+
+    desc_by_name = {
+        item.get("name"): item.get("description") or ""
+        for item in result.get("elements", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    missing = 0
+    for _, el in ordered:
+        el.description = desc_by_name.get(el.name, "")
+        if not el.description:
+            missing += 1
+            print(f"  WARNING: no description returned for '{el.name}'")
+
+    if not graph.image_description:
+        print("  WARNING: no overall image description returned")
+
+    print(f"  Described {len(ordered) - missing}/{len(ordered)} elements")
+    logger.log_text(json.dumps({
+        "image_description": graph.image_description,
+        "background_name": graph.background.name,
+        "background_description": graph.background.description,
+        "global_style": graph.global_style,
+        "elements": {el.name: el.description for _, el in ordered},
+    }, indent=2, ensure_ascii=False), label="descriptions")
+    logger.save_scene_graph(graph, "described")
+
+
+def export_dataset(graph: SceneGraph, logger: RunLogger) -> Path:
+    """Write the finished per-image dataset package into the run folder.
+
+    Package layout (<run_dir>/package/):
+      <stem>.json      summary in target.json format (file_name, description,
+                       layout[{order,name,bbox,description}], global_style)
+      background.png   order 0
+      element01.png    order 1..N, back-to-front — order is the only label
+      <original file>  copy of the input illustration (what file_name points to)
+      reconstruction.png  QA copy of the final composite
+    """
+    print("\n" + "=" * 60)
+    print("EXPORTING DATASET PACKAGE")
+    print("=" * 60)
+
+    if graph.image_description is None:
+        describe(graph, logger)
+
+    pkg_dir = logger.run_dir / "package"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Original illustration — file_name points at this copy.
+    src_image = Path(graph.image_path)
+    file_name = src_image.name
+    shutil.copy2(src_image, pkg_dir / file_name)
+
+    # 2. Layout: order 0 = background.
+    layout: list[dict] = []
+    bg_path = graph.background.image_path
+    if bg_path and Path(bg_path).exists():
+        shutil.copy2(bg_path, pkg_dir / "background.png")
+        layout.append({
+            "order": 0,
+            "name": graph.background.name or "background",
+            "bbox": [0, 0, 1000, 1000],
+            "description": graph.background.description or "",
+        })
+    else:
+        print("  WARNING: background image missing — omitted from layout")
+
+    # 3. Elements: element<order>.png, back-to-front.
+    for order, el in compute_orders(graph):
+        dst_name = f"element{order:02d}.png"
+        shutil.copy2(el.layer_path, pkg_dir / dst_name)
+        layout.append({
+            "order": order,
+            "name": el.name,
+            "bbox": list(el.bbox),
+            "description": el.description or "",
+        })
+        print(f"  order {order:02d}: {el.name} -> {dst_name}")
+
+    # 4. Reconstruction copy for QA (not referenced by file_name).
+    recon_candidates = sorted(logger.run_dir.glob("*reconstruction*.png"))
+    if recon_candidates:
+        shutil.copy2(recon_candidates[-1], pkg_dir / "reconstruction.png")
+
+    # 5. The summary json, keys in target.json order.
+    summary = {
+        "file_name": file_name,
+        "description": graph.image_description or "",
+        "layout": layout,
+        "global_style": graph.global_style or {"color_scheme": "", "mood": ""},
+    }
+    json_path = pkg_dir / f"{src_image.stem}.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    print(f"  Package: {pkg_dir}")
+    print(f"  Items: {len(layout)} (1 background + {len(layout) - 1} elements)")
+    return pkg_dir
+
+
+# ---------------------------------------------------------------------------
 # Ship
 # ---------------------------------------------------------------------------
 def ship(graph: SceneGraph, logger: RunLogger) -> dict:
@@ -718,8 +896,12 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
         # Stage 4
         run_stage4(graph, logger, use_global, use_verify)
 
+        # Dataset package (descriptions + order-labelled export)
+        pkg_dir = export_dataset(graph, logger)
+
         # Ship
         result = ship(graph, logger)
+        result["package_dir"] = str(pkg_dir)
         print("\n[PIPELINE] COMPLETE")
         return result
 

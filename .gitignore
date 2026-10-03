@@ -4,6 +4,7 @@ __pycache__/
 logs/
 runs/
 runsreal/
+runs_faketest/
 reconstruction/
 
 cleaned/

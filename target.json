@@ -1,0 +1,52 @@
+{
+  "file_name": "sydney_harbor_compound.png",
+  "description": "An illustration depicting the bustling scene of Sydney Harbour in Australia. The iconic Sydney Opera House stands at the center, with a large container ship and a small workboat sailing on the shimmering sea in the foreground. A red-white-blue passenger aircraft flies low in the sky above. The overall color scheme is dominated by blue-green tones, vividly presenting a dynamic scene of international trade and urban vitality.",
+  "layout": [
+    {
+      "order": 0,
+      "name": "blue ocean background",
+      "bbox": [0, 0, 1000, 1000],
+      "description": "Clear sea level with gradient from light blue to deep blue, no other objects, serves as the base background"
+    },
+    {
+      "order": 1,
+      "name": "white clouds",
+      "bbox": [14, 417, 316, 683],
+      "description": "Soft white clouds in light blue sky, fluffy shape, located above and to the left of the Opera House"
+    },
+    {
+      "order": 2,
+      "name": "Sydney Opera House",
+      "bbox": [266, 256, 731, 698],
+      "description": "White shell-like roof structure on a wooden base, centrally positioned and slightly to the right, serving as the visual focal point"
+    },
+    {
+      "order": 3,
+      "name": "red-white-blue airplane",
+      "bbox": [131, 264, 395, 367],
+      "description": "Low-flying passenger aircraft with red stripes on wings and red-white-blue livery, located in the sky above and to the left of the Opera House"
+    },
+    {
+      "order": 4,
+      "name": "colorful container ship",
+      "bbox": [186, 384, 722, 717],
+      "description": "Blue-green hull with stacked containers in red, yellow, blue, and green, docked in front of the Opera House"
+    },
+    {
+      "order": 5,
+      "name": "dark sea waves",
+      "bbox": [48, 673, 807, 817],
+      "description": "Blue-green wave texture with darker tone, located at the bottom foreground to enhance water movement"
+    },
+    {
+      "order": 6,
+      "name": "yellow small boat",
+      "bbox": [389, 752, 805, 870],
+      "description": "Yellow hull with black bottom, orange chimney, and navigation lights, sailing in front of the container ship, positioned at the very foreground"
+    }
+  ],
+  "global_style": {
+    "color_scheme": "Blue-Green tones",
+    "mood": "Dynamic and vibrant"
+  }
+}
