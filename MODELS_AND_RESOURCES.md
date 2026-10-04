@@ -18,7 +18,7 @@ another available GPUs and you can modify your codes according to it.
 
 ## Calling conventions
 
-VLM, single image (planner):
+VLM (Qwen3.8-27B), single image (planner):
 ```python
 from call_Qwen3VL import Qwen3VL_inference
 out = Qwen3VL_inference(image, user_text, system_prompt=PLANNER_PROMPT, max_new_tokens=1500)
@@ -30,7 +30,7 @@ out = Qwen3VL_inference([original_crop, result_cutout], VERIFY_TEXT,
                         system_prompt=ELEMENT_VERIFIER_PROMPT, max_new_tokens=256)
 ```
 
-JoyAI edit (stays on cuda:1):
+JoyAI edit via the diffusers pipeline (stays on cuda:1):
 ```python
 from call_JoyAI import JoyEdit
 res = JoyEdit(crop, isolation_prompt, out_path, device="cuda:1", seed=attempt_seed)
@@ -48,4 +48,10 @@ During tuning you'll restart the orchestrator constantly. In one process, every 
 
 ## Python Environment
 
-Use Python under the path `/remote-home/Zhangkaile/miniconda3/envs/JoyZ/bin/python3.10`. Note: this conda environment contains every package you'll ever need, so do not pip install anything. You can inform me whenever unexpected devolping issues happen. Plus, if you would run a process consumes large time, you can use `nohup` and save the log.
+Use Python under the conda env `JoyNew`
+(`/remote-home/Zhangkaile/miniconda3/envs/JoyNew/bin/python`). Note: this
+conda environment contains every package you'll ever need (diffusers with
+`JoyImageEditPipeline`, transformers with `AutoModelForImageTextToText`, …),
+so do not pip install anything. You can inform me whenever unexpected
+developing issues happen. Plus, if you would run a process that consumes a
+large amount of time, you can use `nohup` and save the log.

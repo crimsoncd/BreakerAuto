@@ -7,9 +7,9 @@ overridden through the environment (the env var name is shown next to each
 entry), so you never have to edit this file to run on a new machine.
 
 Before the first run, point at least these at your local resources:
-  * QWEN_MODEL_ID   -- local directory (or HuggingFace repo id) of Qwen3-VL.
-  * JOYAI_CKPT_ROOT -- checkpoint directory of the JoyAI image-edit model.
-  * JOYAI_SRC_DIR   -- root of your local clone of the JoyAI-Image repo.
+  * QWEN_MODEL_ID   -- local directory (or HuggingFace repo id) of the VLM.
+  * JOYAI_CKPT_ROOT -- Diffusers-format checkpoint dir of the JoyAI image-edit
+                       model (loaded via diffusers.JoyImageEditPipeline).
 """
 
 import os
@@ -30,30 +30,26 @@ MAX_ENUM_REOPENINGS = 3
 MAX_ELEMENTS = 20
 
 # ---------------------------------------------------------------------------
-# VLM configuration (Qwen3-VL)
+# VLM configuration (Qwen3.8 multimodal LLM)
 # ---------------------------------------------------------------------------
 # Local model directory or a HuggingFace repo id. Env: QWEN_MODEL_ID
-QWEN_MODEL_ID = _from_env("QWEN_MODEL_ID", "/remote-home/Zhangkaile/models/Qwen3-VL-32B-Instruct/")
+QWEN_MODEL_ID = _from_env("QWEN_MODEL_ID", "/remote-home/Zhangkaile/models/Qwen3.8-27B")
 
 # GPU card for the VLM, e.g. "cuda:0". Leave None to auto-detect the freest
 # card at runtime. Env: QWEN_DEVICE
 QWEN_DEVICE = os.environ.get("QWEN_DEVICE")
 
 VLM_SYSTEM_PROMPT = ""  # filled per role
-VLM_MAX_TOKENS_PLANNER = 1500
-VLM_MAX_TOKENS_CHECKER = 256
-VLM_MAX_TOKENS_PROMPT_WRITER = 512
-VLM_MAX_TOKENS_DESCRIBER = 1500
+VLM_MAX_TOKENS_PLANNER = 15000
+VLM_MAX_TOKENS_CHECKER = 2560
+VLM_MAX_TOKENS_PROMPT_WRITER = 5120
+VLM_MAX_TOKENS_DESCRIBER = 15000
 
 # ---------------------------------------------------------------------------
-# JoyAI configuration (image edit model)
+# JoyAI configuration (image edit model, diffusers JoyImageEditPipeline)
 # ---------------------------------------------------------------------------
-# Checkpoint root for the JoyAI image-edit model. Env: JOYAI_CKPT_ROOT
-JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit/")
-
-# Root of the JoyAI-Image source repository. Its `src` subdirectory is added
-# to sys.path so `infer_runtime` / `modules` resolve. Env: JOYAI_SRC_DIR
-JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "/remote-home/Zhangkaile/dev/JoyAI-Image")
+# Diffusers-format checkpoint directory. Env: JOYAI_CKPT_ROOT
+JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit-Diffusers/")
 
 # GPU card for JoyAI, e.g. "cuda:1". Leave None to auto-detect the freest
 # card at runtime. MUST be a different card than the VLM when both models run
@@ -61,8 +57,8 @@ JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "/remote-home/Zhangkaile/dev/JoyAI-Im
 JOYAI_DEVICE = os.environ.get("JOYAI_DEVICE")
 
 JOYAI_BASE_SEED = 42
-JOYAI_STEPS = 30
-JOYAI_GUIDANCE_SCALE = 5.0
+JOYAI_STEPS = 40
+JOYAI_GUIDANCE_SCALE = 4.0
 
 # ---------------------------------------------------------------------------
 # Bounding box normalization

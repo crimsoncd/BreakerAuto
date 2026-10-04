@@ -31,10 +31,10 @@ class BackgroundStatus(Enum):
 class Element:
     """One element/layer extracted from the illustration."""
 
-    id: str                                 # stable unique handle, e.g. "girl_01"
-    name: str                               # object-level label
+    id: str                                 # stable unique handle, e.g. "element_01" (one-and-only label)
+    name: str                               # object-level label from the planner
     bbox: list[int]                         # [xmin, ymin, xmax, ymax] normalized to 0-1000
-    depth_rank: int                         # 1 = frontmost
+    order: int                              # drawing order from the planner; higher = drawn later = frontmost
     overlaps: list[str] = field(default_factory=list)  # names of elements this one overlaps
     isolation_prompt: Optional[str] = None
     layer_path: Optional[str] = None       # final RGBA cutout
@@ -48,7 +48,7 @@ class Element:
             "id": self.id,
             "name": self.name,
             "bbox": self.bbox,
-            "depth_rank": self.depth_rank,
+            "order": self.order,
             "overlaps": self.overlaps,
             "isolation_prompt": self.isolation_prompt,
             "layer_path": self.layer_path,
@@ -64,7 +64,7 @@ class Element:
             id=d["id"],
             name=d["name"],
             bbox=d["bbox"],
-            depth_rank=d["depth_rank"],
+            order=d.get("order", d.get("depth_rank", 1)),
             overlaps=d.get("overlaps", []),
             isolation_prompt=d.get("isolation_prompt"),
             layer_path=d.get("layer_path"),
@@ -180,8 +180,16 @@ class SceneGraph:
         return None
 
     def sorted_elements(self) -> list[Element]:
-        """Return elements sorted by depth_rank (1 = frontmost first, then deeper)."""
-        return sorted(self.elements, key=lambda e: e.depth_rank)
+        """Return elements sorted front-to-back (highest order = frontmost first)."""
+        return sorted(self.elements, key=lambda e: -e.order)
+
+    def back_to_front(self) -> list[Element]:
+        """Return elements sorted back-to-front (ascending order; draw order)."""
+        return sorted(self.elements, key=lambda e: e.order)
+
+    def max_order(self) -> int:
+        """Highest element order currently in the graph (0 if empty)."""
+        return max((e.order for e in self.elements), default=0)
 
     def next_available_id(self) -> str:
         """Generate a unique element id."""

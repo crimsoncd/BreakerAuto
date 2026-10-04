@@ -122,19 +122,33 @@ def process_dataset(input_dir, output_root, collection_code):
         # --- 4. Process Foreground Elements ---
         elements = old_data.get("elements", [])
         for elem in elements:
+            elem_id = elem.get("id", "")
             elem_name = elem.get("name")
             bbox = elem.get("bbox")
-            layer = elem.get("depth_rank", 1)
+            # New scene graphs carry the planner `order` (higher = drawn later
+            # = frontmost); older ones used depth_rank (1 = frontmost).
+            layer = elem.get("order", elem.get("depth_rank", 1))
             layer_path = elem.get("layer_path")
-            
-            # Find layer file location robustly
-            actual_layer_path = find_file_robustly(folder_path, layer_path, f"*_{elem_name}.png")
-            
+
+            # Find layer file location robustly. New run folders name layers by
+            # element id (layer_element_01.png); older ones by name.
+            actual_layer_path = None
+            if elem_id:
+                actual_layer_path = find_file_robustly(
+                    folder_path, layer_path, f"*_{elem_id}.png")
+            if actual_layer_path is None:
+                actual_layer_path = find_file_robustly(
+                    folder_path, layer_path, f"*_{elem_name}.png")
+
+            # Prefer the element id (element_01, ...) as the neat label;
+            # fall back to the name for old-format folders.
+            label = elem_id or elem_name
+
             if actual_layer_path:
-                elem_filename = f"{new_folder_name}_{elem_name}.png"
+                elem_filename = f"{new_folder_name}_{label}.png"
                 dest_elem_path = os.path.join(target_dir, elem_filename)
                 shutil.copy(actual_layer_path, dest_elem_path)
-                
+
                 new_elements.append({
                     "name": elem_name,
                     "bbox": bbox,
@@ -142,7 +156,7 @@ def process_dataset(input_dir, output_root, collection_code):
                     "path": f"{relative_folder_path}/{elem_filename}"
                 })
             else:
-                print(f"  Warning: Layer image for '{elem_name}' not found in {folder_name}")
+                print(f"  Warning: Layer image for '{label}' not found in {folder_name}")
                 
         # --- 5. Generate and save new metadata.json ---
         metadata = {

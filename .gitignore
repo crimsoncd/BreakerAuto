@@ -1,10 +1,12 @@
 __pycache__/
 .vscode/
+.mimocode/
 
 logs/
 runs/
 runsreal/
 runs_faketest/
+runsorder/
 reconstruction/
 
 cleaned/

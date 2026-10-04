@@ -1,6 +1,8 @@
 import argparse
+import re
+
 import torch
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 import config
 
@@ -14,8 +16,8 @@ def _default_device() -> str:
     return config.QWEN_DEVICE or "cuda:0"
 
 
-def get_model_and_processor(use_flash_attn=False, device=None):
-    """Initializes and caches the Qwen3-VL model and processor."""
+def get_model_and_processor(device=None):
+    """Initializes and caches the Qwen3.8 VLM and processor."""
     global _model, _processor
 
     if _model is None or _processor is None:
@@ -23,27 +25,23 @@ def get_model_and_processor(use_flash_attn=False, device=None):
         model_id = config.QWEN_MODEL_ID
         print(f"Loading {model_id} on {device}...")
 
-        # Always use bfloat16 to fit the 32B model in GPU memory (~64GB).
-        # float32 would require ~128GB and cause CPU offloading / extreme slowdown.
-        kwargs = {
-            "device_map": device,
-            "torch_dtype": torch.bfloat16,
-        }
-        if use_flash_attn:
-            kwargs["attn_implementation"] = "flash_attention_2"
-            print("Flash Attention 2 enabled.")
+        # Always use bfloat16 to fit the 27B model in GPU memory.
+        _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        _model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            device_map=device,
+            dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+            trust_remote_code=True,
+        ).eval()
 
-        _model = Qwen3VLForConditionalGeneration.from_pretrained(model_id, **kwargs)
-        _processor = AutoProcessor.from_pretrained(model_id)
-
-        print("--- Qwen3VL Device Map ---")
-        print(_model.hf_device_map)
+        print("--- Qwen3.8 Device ---")
+        print(next(_model.parameters()).device)
 
     return _model, _processor
 
 
 def clear_qwen_cache():
-    """Clear the cached Qwen3VL model and free GPU memory."""
+    """Clear the cached VLM and free GPU memory."""
     global _model, _processor
     _model = None
     _processor = None
@@ -60,17 +58,40 @@ def _normalize_images(image_input):
     return [image_input]
 
 
+def _load_pil_images(images):
+    """Coerce every entry (path / PIL) into an RGB PIL image."""
+    from PIL import Image
+
+    loaded = []
+    for img in images:
+        if isinstance(img, Image.Image):
+            loaded.append(img.convert("RGB"))
+        else:
+            loaded.append(Image.open(str(img)).convert("RGB"))
+    return loaded
+
+
+def _strip_think(text: str) -> str:
+    """Remove reasoning/think blocks the model may emit before the answer."""
+    return re.sub(
+        r"(<think>.*?</think>|^.*?</think>|<think>.*$)",
+        "",
+        text,
+        flags=re.DOTALL,
+    ).strip()
+
+
 def Qwen3VL_inference(
     image_input,
     prompt,
     system_prompt=None,
     use_flash_attn=False,
-    max_new_tokens=512,
+    max_new_tokens=65536,
     deterministic=True,
     device=None,
 ):
     """
-    Runs inference on Qwen3-VL with one or MORE images and a text prompt.
+    Runs inference on the Qwen3.8 VLM with one or MORE images and a text prompt.
 
     Args:
         image_input: a single image (URL / local path / PIL.Image) OR a list of
@@ -81,64 +102,71 @@ def Qwen3VL_inference(
         prompt (str): the user text / question.
         system_prompt (str|None): optional system role text. Our seven agent
             roles are written as system prompts; pass them here.
-        use_flash_attn (bool): whether to use Flash Attention 2.
+        use_flash_attn (bool): kept for API compatibility; attention backend is
+            chosen by the model config.
         max_new_tokens (int): max tokens to generate. Use ~1500 for the planner
             (long JSON), ~256 for the checkers. Default 512.
         deterministic (bool): if True, greedy decoding (do_sample=False) for
-            reproducible, parseable structured output. Set False only if you
-            deliberately want sampling.
+            reproducible, parseable structured output. If False, samples with
+            temperature=0.7 / top_p=0.8.
 
     Returns:
-        str: the generated text response.
+        str: the generated text response (think blocks stripped).
     """
-    model, processor = get_model_and_processor(use_flash_attn=use_flash_attn, device=device)
+    model, processor = get_model_and_processor(device=device)
 
-    images = _normalize_images(image_input)
+    images = _load_pil_images(_normalize_images(image_input))
+    # prompt = prompt + " /no_think"
 
     # Build the user content: one image block per image, then the text.
-    user_content = [{"type": "image", "image": img} for img in images]
+    user_content = [{"type": "image"} for _ in images]
     user_content.append({"type": "text", "text": prompt})
 
     messages = []
     if system_prompt:
-        # The processor expects system message content as a list of text blocks too
         messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
     messages.append({"role": "user", "content": user_content})
 
-    # Preparation for inference
-    inputs = processor.apply_chat_template(
+    # Apply the chat template, then build tensors with the processor.
+    text_input = processor.apply_chat_template(
         messages,
-        tokenize=True,
+        tokenize=False,
         add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
     )
-    inputs = inputs.to(model.device)
+
+    inputs = processor(
+        text=[text_input],
+        images=images if images else None,
+        return_tensors="pt",
+        padding=True,
+    ).to(model.device)
 
     # Inference
     print("Generating response...")
     gen_kwargs = {"max_new_tokens": max_new_tokens}
     if deterministic:
         gen_kwargs["do_sample"] = False  # greedy -> reproducible JSON
+    else:
+        gen_kwargs.update(do_sample=True, temperature=0.7, top_p=0.8)
 
-    generated_ids = model.generate(**inputs, **gen_kwargs)
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, **gen_kwargs)
 
     # Trim the input tokens out of the generated response tokens
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
+    input_len = inputs.input_ids.shape[1]
+    generated_ids_trimmed = [out_ids[input_len:] for out_ids in generated_ids]
 
     output_text = processor.batch_decode(
         generated_ids_trimmed,
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
-    )
+    )[0]
 
-    return output_text[0]
+    return _strip_think(output_text)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Query Qwen3-VL-32B-Instruct via CLI.")
+    parser = argparse.ArgumentParser(description="Query the Qwen3.8 VLM via CLI.")
 
     # Required arguments
     parser.add_argument("--image", type=str, required=True, nargs="+",
@@ -148,7 +176,7 @@ if __name__ == "__main__":
     # Optional arguments
     parser.add_argument("--system", type=str, default=None, help="Optional system prompt.")
     parser.add_argument("--max_tokens", type=int, default=512, help="Maximum new tokens to generate.")
-    parser.add_argument("--flash_attn", action="store_true", help="Enable Flash Attention 2.")
+    parser.add_argument("--flash_attn", action="store_true", help="Kept for compatibility (unused).")
     parser.add_argument("--sample", action="store_true", help="Enable sampling (default is greedy).")
     parser.add_argument("--device", type=str, default=None,
                         help="GPU card, e.g. cuda:0 (default: from config or cuda:0).")

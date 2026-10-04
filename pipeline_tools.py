@@ -463,8 +463,8 @@ def _fake_vlm(system_prompt: str, image_input, user_text: str,
     # Layout describer — must be checked first: its prompt mentions several
     # phrases shared with other roles (background, foreground objects).
     if "scene describer" in system_prompt.lower():
-        # Element names arrive inside the {element_summaries} JSON payload.
-        names = re.findall(r'"name":\s*"([^"]+)"', system_prompt)
+        # Element ids arrive inside the {element_summaries} JSON payload.
+        ids = re.findall(r'"id":\s*"([^"]+)"', system_prompt)
         return json.dumps({
             "description": "A flat-style illustration of a simple outdoor scene: a girl stands on a grassy field beside a tree under a bright open sky.",
             "background": {
@@ -473,17 +473,22 @@ def _fake_vlm(system_prompt: str, image_input, user_text: str,
             },
             "global_style": {"color_scheme": "Bright natural tones", "mood": "Calm and cheerful"},
             "elements": [
-                {"name": n, "description": f"The {n.replace('_', ' ')} placed in the scene."}
-                for n in names
+                {"id": i, "description": f"Layout item {i} placed in the scene."}
+                for i in ids
             ],
         })
     # Return different canned responses based on what the system prompt contains
     if "scene analyst" in system_prompt.lower():
         return json.dumps({
-            "elements": [
-                {"name": "girl", "bbox": [200, 50, 450, 600], "depth_rank": 1, "overlaps": ["grass"]},
-                {"name": "tree", "bbox": [600, 30, 900, 500], "depth_rank": 2, "overlaps": ["grass"]},
-                {"name": "grass", "bbox": [0, 400, 1000, 1000], "depth_rank": 3, "overlaps": []},
+            "layout": [
+                {"order": 0, "name": "bright_sky_background", "bbox": [0, 0, 1000, 1000],
+                 "description": "A flat-style illustration of a simple outdoor scene: a girl stands on a grassy field beside a tree under a bright open sky."},
+                {"order": 1, "name": "grassy_field", "bbox": [0, 400, 1000, 1000],
+                 "description": "The grassy field covering the lower part of the scene."},
+                {"order": 2, "name": "tree", "bbox": [600, 30, 900, 500],
+                 "description": "A leafy tree on the right side of the scene."},
+                {"order": 3, "name": "girl", "bbox": [200, 50, 450, 600],
+                 "description": "A girl standing on the grassy field in the foreground."},
             ]
         })
     if "occupancy" in system_prompt.lower() or "intrude" in system_prompt.lower():
