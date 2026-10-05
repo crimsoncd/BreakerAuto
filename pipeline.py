@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 import traceback
 from pathlib import Path
 
@@ -53,6 +54,17 @@ from pipeline_tools import (
     resize_layer_to_bbox, denorm_bbox_pixels,
     _denorm_bbox,
 )
+
+
+# ---------------------------------------------------------------------------
+# Progress / timing helpers
+# ---------------------------------------------------------------------------
+def _fmt_duration(seconds: float) -> str:
+    """Format seconds as '65.3s' below 2 minutes, else '12m 05s'."""
+    if seconds < 120:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs:02d}s"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +254,8 @@ def _verify_element(element: Element, original_crop: Image.Image,
 def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_verify: bool) -> None:
     """Stage 2: Full element extraction pipeline with retry loop."""
     print(f"\n  --- Extracting: {element.name} (id={element.id}) ---")
+    print(f"  [el {element.id}] extraction started")
+    t_el = time.time()
     element.status = ElementStatus.EXTRACTING
 
     original_img = Image.open(graph.image_path)
@@ -250,16 +264,17 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
     # Step 1: Crop the bbox with padding
     crop_img = crop(original_img, element.bbox, pad=0.1)
     crop_path = logger.save_image(crop_img, f"crop_{element.id}")
-    print(f"  Crop saved: {crop_path}")
+    print(f"  [el {element.id}] Step 1/6 crop saved: {crop_path}")
 
     # Step 2: Occupancy check
+    print(f"  [el {element.id}] Step 2/6 occupancy check...")
     occupancy = _check_occupancy(graph, element, crop_img, logger)
     target_present = occupancy.get("target_present", True)
     contaminants = occupancy.get("contaminants", [])
-    print(f"  Occupancy: present={target_present}, contaminants={contaminants}")
+    print(f"  [el {element.id}] Step 2/6 occupancy done: present={target_present}, contaminants={contaminants}")
 
     if not target_present:
-        print(f"  WARNING: target '{element.name}' not found in crop! Continuing anyway.")
+        print(f"  [el {element.id}] WARNING: target '{element.name}' not found in crop! Continuing anyway.")
 
     # Retry loop
     best_result = None
@@ -267,20 +282,23 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
     best_attempt = 0
 
     for attempt in range(1, ELEMENT_RETRIES + 1):
-        print(f"  Attempt {attempt}/{ELEMENT_RETRIES}")
+        print(f"\n  [el {element.id}] Attempt {attempt}/{ELEMENT_RETRIES} started")
+        t_att = time.time()
 
         # Step 3: Write isolation prompt
+        print(f"  [el {element.id}] Step 3/6 writing isolation prompt (attempt {attempt}/{ELEMENT_RETRIES})...")
         defects_for_prompt = []
         if best_defects:
             defects_for_prompt = best_defects
         isolation_prompt = _write_isolation_prompt(
             element, contaminants, defects_for_prompt, logger)
         element.isolation_prompt = isolation_prompt
-        print(f"  Isolation prompt: {isolation_prompt[:100]}...")
+        print(f"  [el {element.id}] Step 3/6 isolation prompt: {isolation_prompt[:80]}...")
 
         # Step 4: Generate with JoyAI
         seed = JOYAI_BASE_SEED + attempt
         gen_out_path = logger.run_dir / f"joyai_{element.id}_attempt{attempt}.png"
+        print(f"  [el {element.id}] Step 4/6 JoyAI generation (attempt {attempt}/{ELEMENT_RETRIES}, seed={seed})...")
         if pipeline_tools.FAKE_MODE:
             generated = pipeline_tools._fake_joyai(crop_img, isolation_prompt, gen_out_path, seed)
         else:
@@ -289,10 +307,11 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
                 logger.save_image(generated, f"gen_{element.id}_att{attempt}")
 
         if generated is None:
-            print(f"  JoyAI generation failed for {element.id}")
+            print(f"  [el {element.id}] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — JoyAI generation failed")
             continue
 
         # Step 5: Matte to alpha
+        print(f"  [el {element.id}] Step 5/6 matting to alpha + resize to bbox...")
         rgba_layer = matte_to_alpha(generated)
         matte_path = logger.save_image(rgba_layer, f"matte_{element.id}_att{attempt}")
 
@@ -301,15 +320,16 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
 
         # Step 6: Verify
         if not use_verify:
-            print("Skipping verification...")
+            print(f"  [el {element.id}] Step 6/6 verification skipped (--use_verify not set)")
             verification = {"ok": True, "defects": None, "notes": None}
         else:
+            print(f"  [el {element.id}] Step 6/6 verifying cutout against original crop...")
             verification = _verify_element(element, crop_img, rgba_resized, logger)
         ok = verification.get("ok", False)
         defects = verification.get("defects", [])
         notes = verification.get("notes", "")
 
-        print(f"  Verification: ok={ok}, defects={defects}, notes={notes}")
+        print(f"  [el {element.id}] Step 6/6 verification result: ok={ok}, defects={defects}, notes={(notes or '')[:80]}")
 
         # Track best
         if best_result is None or ok:
@@ -319,10 +339,12 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
             element.layer_path = str(matte_path)
             element.defects = defects
 
+        print(f"  [el {element.id}] attempt {attempt} finished in {_fmt_duration(time.time() - t_att)}")
         if ok:
             break
 
     # After retry loop
+    print(f"  [el {element.id}] retry loop finished — best attempt {best_attempt}, total {_fmt_duration(time.time() - t_el)}")
     element.attempts = best_attempt
     if best_result is not None:
         # Use best_defects to determine if the final result is clean
@@ -428,12 +450,15 @@ def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
 
     graph.background.status = BackgroundStatus.GENERATING
     original_img = Image.open(graph.image_path)
+    t_bg = time.time()
+    print("  [bg] background extraction started")
 
     best_bg = None
     best_defects = None
 
     for attempt in range(1, BACKGROUND_RETRIES + 1):
-        print(f"\n  Background attempt {attempt}/{BACKGROUND_RETRIES}")
+        print(f"\n  [bg] Attempt {attempt}/{BACKGROUND_RETRIES} started")
+        t_att = time.time()
 
         # Write prompt
         defects_for_prompt = best_defects if best_defects else []
@@ -452,7 +477,7 @@ def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
                 logger.save_image(generated, f"bg_gen_att{attempt}")
 
         if generated is None:
-            print(f"  Background generation failed on attempt {attempt}")
+            print(f"  [bg] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — generation failed")
             continue
 
         # Verify
@@ -465,10 +490,12 @@ def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
         best_bg = generated
         best_defects = defects
 
+        print(f"  [bg] attempt {attempt} finished in {_fmt_duration(time.time() - t_att)}")
         if ok:
             break
 
     graph.background.attempts = attempt
+    print(f"  [bg] retry loop finished — best attempt {attempt}, total {_fmt_duration(time.time() - t_bg)}")
 
     if best_bg is not None:
         bg_path = logger.run_dir / "background_final.png"
@@ -644,7 +671,8 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, use_global: bool,
     """
     while graph.global_attempts < GLOBAL_ATTEMPTS:
         graph.global_attempts += 1
-        print(f"\n  --- Global attempt {graph.global_attempts}/{GLOBAL_ATTEMPTS} ---")
+        print(f"\n  --- Global attempt {graph.global_attempts}/{GLOBAL_ATTEMPTS} started ---")
+        t_g = time.time()
 
         recon = reassemble(graph, logger)
         verdict = global_verify(graph, recon, logger, use_global)
@@ -657,6 +685,7 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, use_global: bool,
         print(f"  Reorder: {verdict.get('reorder', [])}")
 
         if ok:
+            print(f"\n  [global] attempt {graph.global_attempts} finished in {_fmt_duration(time.time() - t_g)} — accepted")
             print("\n  >>> RECONSTRUCTION ACCEPTED")
             logger.save_scene_graph(graph, "final_accepted")
             return True
@@ -664,8 +693,11 @@ def run_stage4(graph: SceneGraph, logger: RunLogger, use_global: bool,
         # Apply routing
         action_taken = apply_routing(verdict, graph, logger, use_verify)
         if not action_taken:
+            print(f"\n  [global] attempt {graph.global_attempts} finished in {_fmt_duration(time.time() - t_g)} — no routing actions")
             print("\n  >>> NO ROUTING ACTIONS — terminating loop")
             break
+
+        print(f"  [global] attempt {graph.global_attempts} finished in {_fmt_duration(time.time() - t_g)} — routing applied, looping")
 
     # Budget exhausted
     print(f"\n  >>> BUDGET EXHAUSTED ({graph.global_attempts}/{GLOBAL_ATTEMPTS}) — shipping best partial")
@@ -898,9 +930,13 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
     if use_fake:
         print("[PIPELINE] RUNNING IN FAKE/STUB MODE — no real model calls")
 
-    # Auto-detect GPUs before any model loading (only in non-fake mode)
+    t_run = time.time()
+    print(f"[PIPELINE] Run started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Resolve JoyAI's GPU before any model loading (only in non-fake mode).
+    # The VLM runs remotely via API, so a single local GPU suffices.
     if not use_fake:
-        device1, device2 = pipeline_tools.auto_detect_gpu_devices()
+        pipeline_tools.resolve_joyai_device()
 
     if use_verify:
         print("Element verification ENABLED — VLM checks each extracted cutout.")
@@ -915,7 +951,10 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
 
     try:
         # Stage 1
+        t_stage = time.time()
         graph = plan(image_path, logger)
+        print(f"\n[PIPELINE] Stage 1 (planning) finished in {_fmt_duration(time.time() - t_stage)} "
+              f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
         if not graph.elements:
             print("[PIPELINE] No elements found in plan. Skipping extraction.")
@@ -923,25 +962,38 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
             graph.background.image_path = image_path  # use original as bg fallback
         else:
             # Stage 2
+            t_stage = time.time()
             run_stage2(graph, logger, use_verify)
+            print(f"\n[PIPELINE] Stage 2 (element extraction) finished in {_fmt_duration(time.time() - t_stage)} "
+                  f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
             # Stage 3
+            t_stage = time.time()
             extract_background(graph, logger)
+            print(f"\n[PIPELINE] Stage 3 (background) finished in {_fmt_duration(time.time() - t_stage)} "
+                  f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
         # Stage 4
+        t_stage = time.time()
         run_stage4(graph, logger, use_global, use_verify)
+        print(f"\n[PIPELINE] Stage 4 (reassembly) finished in {_fmt_duration(time.time() - t_stage)} "
+              f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
         # Dataset package (descriptions + order-labelled export)
+        t_stage = time.time()
         pkg_dir = export_dataset(graph, logger)
+        print(f"\n[PIPELINE] Dataset export finished in {_fmt_duration(time.time() - t_stage)} "
+              f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
         # Ship
         result = ship(graph, logger)
         result["package_dir"] = str(pkg_dir)
-        print("\n[PIPELINE] COMPLETE")
+        result["elapsed_seconds"] = time.time() - t_run
+        print(f"\n[PIPELINE] COMPLETE — total time {_fmt_duration(time.time() - t_run)}")
         return result
 
     except Exception as e:
-        print(f"\n[PIPELINE] ERROR: {e}")
+        print(f"\n[PIPELINE] ERROR after {_fmt_duration(time.time() - t_run)}: {e}")
         traceback.print_exc()
         logger.log_text(traceback.format_exc(), "pipeline_error")
         raise

@@ -2,8 +2,8 @@
 
 An agentic pipeline that takes a single artistic illustration and decomposes it into a **background** layer plus N **element** layers (object-level cutouts), then reassembles them into a reconstruction of the original.
 
-- Perception & judgment (planning, prompt-writing, verification) → **Qwen3.8-27B** (multimodal LLM)
-- Generative isolation / amodal completion / background fill → **JoyAI** (image-edit model)
+- Perception & judgment (planning, prompt-writing, verification) → **qwen3.7-flash** via the Bailian (DashScope) OpenAI-compatible API — no local GPU needed
+- Generative isolation / amodal completion / background fill → **JoyAI** (image-edit model, local GPU)
 - Matting, resizing, compositing → classical CV (Pillow / rembg), no ML
 
 For the full design spec (scene-graph data contract, stage breakdown, budgets, known pitfalls), see [`AGENT_BUILD_INSTRUCTIONS.md`](AGENT_BUILD_INSTRUCTIONS.md). The system prompts for every agent role live in [`prompts.py`](prompts.py) (originally [`SYSTEM_PROMPTS.md`](SYSTEM_PROMPTS.md)).
@@ -26,12 +26,12 @@ Every stage reads and writes one shared [`SceneGraph`](scene_graph.py) object; e
 
 ## Requirements
 
-- **Hardware**: a machine with enough VRAM for both models at once. The reference box is 4× A100 80G — the VLM (~54GB bf16 for the 27B model) and JoyAI (~80G-class) each get their own card. A single card will not hold both.
-- **Models / code**, pointed at from `config.py`:
-  - The **Qwen3.8** multimodal LLM (local directory or a HuggingFace repo id, e.g. `/remote-home/Zhangkaile/models/Qwen3.8-27B`).
+- **Hardware**: one GPU with enough VRAM for JoyAI (~80G-class). The VLM runs remotely through the Bailian API, so it needs no local GPU and no co-residence constraint. (The reference box was 4× A100 80G; spare cards can host a second JoyAI worker to parallelize element extraction.)
+- **API key**: a Bailian API key in the git-ignored `.env` file as `BAILIAN_API_KEY` (loaded at import time; see `config.py`).
+- **Model / code**, pointed at from `config.py`:
   - The **JoyAI-Image** release in **Diffusers format** (a checkpoint directory loadable via `diffusers.JoyImageEditPipeline`; no private package build required).
 - **Python 3.10+** with the packages in [`requirements.txt`](requirements.txt) (or install this repo as a package via `pip install -e .`).
-- **Reference environment**: the conda env `JoyNew` (`/remote-home/Zhangkaile/miniconda3/envs/JoyNew/bin/python`) — it ships the diffusers build with `JoyImageEditPipeline` and the transformers build with `AutoModelForImageTextToText` that the wrappers rely on (see [`MODELS_AND_RESOURCES.md`](MODELS_AND_RESOURCES.md)).
+- **Reference environment**: the conda env `JoyNew` (`/remote-home/Zhangkaile/miniconda3/envs/JoyNew/bin/python`) — it ships the diffusers build with `JoyImageEditPipeline` and the `openai` client the wrappers rely on (see [`MODELS_AND_RESOURCES.md`](MODELS_AND_RESOURCES.md)).
 
 ---
 
@@ -52,20 +52,19 @@ All machine-specific settings live in [`config.py`](config.py). **Either** set
 the environment variables **or** edit `config.py` directly — don't do both:
 
 ```bash
-export QWEN_MODEL_ID=/path/to/Qwen3.8-27B
+# .env (git-ignored) — Bailian API key for the VLM:
+#   BAILIAN_API_KEY=sk-...
 export JOYAI_CKPT_ROOT=/path/to/JoyAI-Image-Edit-Diffusers   # Diffusers-format checkpoint
-export QWEN_DEVICE=cuda:0                           # optional, else auto-detected
-export JOYAI_DEVICE=cuda:1                          # optional, else auto-detected
+export JOYAI_DEVICE=cuda:2                          # optional, else auto-detected
 ```
 
 Editing `config.py` instead looks like this:
 
 ```python
-QWEN_MODEL_ID   = "/path/to/Qwen3.8-27B"
 JOYAI_CKPT_ROOT = "/path/to/JoyAI-Image-Edit-Diffusers"
 ```
 
-   > The two models should live on **different** cards. If you don't set the device variables, the pipeline picks the two cards with the most free memory at startup.
+   > Only JoyAI runs locally, so a single GPU suffices. If you don't set `JOYAI_DEVICE`, the pipeline picks the card with the most free memory at startup.
 
 ---
 
@@ -128,10 +127,11 @@ Everything below lives in [`config.py`](config.py). Env vars (if set) override t
 
 | Key | Env var | Default | Meaning |
 |-----|---------|---------|---------|
-| `QWEN_MODEL_ID` | `QWEN_MODEL_ID` | `/remote-home/Zhangkaile/models/Qwen3.8-27B` | VLM checkpoint dir or HF repo id |
-| `QWEN_DEVICE` | `QWEN_DEVICE` | auto-detect | GPU card for the VLM |
+| `VLM_BASE_URL` | `VLM_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI-compatible endpoint for the VLM |
+| `VLM_API_KEY` | `BAILIAN_API_KEY` | — (from `.env`) | API key for the VLM endpoint |
+| `VLM_MODEL_NAME` | `VLM_MODEL_NAME` | `qwen3.7-flash` | Model name served by the endpoint |
 | `JOYAI_CKPT_ROOT` | `JOYAI_CKPT_ROOT` | `/remote-home/Zhangkaile/models/JoyAI-Image-Edit-Diffusers/` | JoyAI Diffusers-format checkpoint dir |
-| `JOYAI_DEVICE` | `JOYAI_DEVICE` | auto-detect | GPU card for JoyAI (must differ from the VLM's card) |
+| `JOYAI_DEVICE` | `JOYAI_DEVICE` | auto-detect | GPU card for JoyAI (the only local model) |
 | `JOYAI_BASE_SEED` | — | `42` | base seed; bumped on retries |
 | `ELEMENT_RETRIES` | — | `3` | max per-element generation attempts |
 | `BACKGROUND_RETRIES` | — | `3` | max background attempts |
@@ -162,7 +162,7 @@ Every VLM prompt+response, every JoyAI input/output, and every intermediate matt
 
 ## Utility scripts
 
-- [`call_Qwen3VL.py`](call_Qwen3VL.py) — standalone VLM CLI: `python call_Qwen3VL.py --image in.png --prompt "..."`.
+- [`call_bailian_vlm.py`](call_bailian_vlm.py) — the VLM wrapper (Bailian API, qwen3.7-flash); also a small `__main__` sanity CLI: `python call_bailian_vlm.py --image in.png --prompt "..."`.
 - [`call_JoyAI.py`](call_JoyAI.py) — importable `JoyEdit` / `JoyEditBatch` wrappers around the diffusers `JoyImageEditPipeline` (also a small `__main__` sanity CLI).
 - [`cleaner.py`](cleaner.py) — sort finished run folders into a flat, metadata-annotated dataset: `python cleaner.py --input runsreal/<collection> --output cleaned/ --code C`.
 - [`gather_reconstruction.py`](gather_reconstruction.py) — copy the final reconstruction from many run folders into one directory.
@@ -172,7 +172,8 @@ Every VLM prompt+response, every JoyAI input/output, and every intermediate matt
 
 ## Notes & caveats
 
-- Model loading is heavy; in one process both models stay resident (cached), so run the whole batch in a single invocation rather than one process per image.
+- Only JoyAI loads locally and stays resident; run the whole batch in a single invocation rather than one process per image (the VLM is a remote API call).
 - On JoyAI retries the seed is bumped automatically — the same prompt + seed reproduces the same output.
 - The VLM grading its own pipeline tends to be lenient; the verifier prompts are tuned to report *defect categories*, not a yes/no, and always compare against the original as reference.
+- **The verification loops are expensive**: in testing, each JoyAI generation takes ~2 min and the verifier flags nearly every first attempt (`bleed_in`/`halo`), so `--use_verify` can push a single image to ~75 min (8 elements × 3 retries). Some flagged `halo` is introduced by the rembg matting step itself, which no generation retry can fix. Run without `--use_verify`/`--use_global` for fast passes; enable them only when you need the quality gate.
 - See [`AGENT_BUILD_INSTRUCTIONS.md`](AGENT_BUILD_INSTRUCTIONS.md) §10 for the known failure modes (missed elements, identity drift, local-vs-global threshold conflicts, heavy occlusion).

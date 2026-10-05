@@ -16,7 +16,12 @@ Reconstruction test: compositing all elements front-to-back over the background 
 
 ## 2. Models / runtime
 
-- **VLM**: Qwen3.8-27B — all perception and judgment (planning, checks, prompt-writing). One model, many roles, differentiated only by system prompt (see `SYSTEM_PROMPTS.md`).
+> **Status update:** the VLM is no longer the local Qwen3.8-27B — it now runs
+> remotely via the Bailian API (default model `qwen3.7-flash`, see
+> `call_bailian_vlm.py`), so only JoyAI needs a local GPU. Everything below
+> about device co-residence applies to JoyAI alone.
+
+- **VLM**: qwen3.7-flash via the Bailian (DashScope) OpenAI-compatible API — all perception and judgment (planning, checks, prompt-writing). One model, many roles, differentiated only by system prompt (see `prompts.py`).
 - **Edit model**: JoyAI — all generative isolation, amodal completion, and background fill.
 - **DIP**: classical CV (OpenCV/PIL) — plain-bg → alpha matting, cropping, resizing, compositing. No ML.
 - **Hardware**: 4× A100 80G. Models can be held resident; calls are local. Treat both model calls as expensive though — budget them. See `MODELS_AND_RESOURCES.md` for detail.

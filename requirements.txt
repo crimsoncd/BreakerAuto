@@ -9,6 +9,9 @@
 # The VLM (Qwen3.8) runs through transformers `AutoModelForImageTextToText`.
 # -----------------------------------------------------------------------------
 
+# --- VLM API client (Bailian / DashScope OpenAI-compatible endpoint) ---
+openai
+
 torch>=2.8.0
 torchvision
 diffusers>=0.41.0
