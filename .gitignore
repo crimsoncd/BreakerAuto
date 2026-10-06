@@ -9,7 +9,7 @@ runs/
 runsreal/
 runs_faketest/
 runsorder/
-run*
+run*/
 reconstruction/
 
 cleaned/

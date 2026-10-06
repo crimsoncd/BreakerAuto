@@ -33,8 +33,9 @@ rewrite = ["openai"]
 decompose = "main:main"
 
 # This repo uses a flat, top-level-module layout (no package directory), so
-# the modules are listed explicitly. JoyAI runs via the Diffusers integration
-# (diffusers.JoyImageEditPipeline), so no private JoyAI package is required.
+# the modules are listed explicitly. JoyAI loads from the JoyAI-Image source
+# repo (infer_runtime / modules via config.JOYAI_SRC_DIR), which is put on
+# sys.path by call_JoyAI.py — no pip-installable JoyAI package is needed.
 [tool.setuptools]
 py-modules = [
     "call_JoyAI",

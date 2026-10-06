@@ -8,8 +8,10 @@ entry), so you never have to edit this file to run on a new machine.
 
 Before the first run, point at least these at your resources:
   * BAILIAN_API_KEY -- in the git-ignored .env file (key for the Bailian VLM API).
-  * JOYAI_CKPT_ROOT -- Diffusers-format checkpoint dir of the JoyAI image-edit
-                       model (loaded via diffusers.JoyImageEditPipeline).
+  * JOYAI_CKPT_ROOT -- checkpoint directory of the JoyAI image-edit model
+                       (the original release, loaded via the JoyAI-Image repo
+                       code -- see call_JoyAI.py).
+  * JOYAI_SRC_DIR   -- root of your local clone of the JoyAI-Image repo.
 """
 
 import os
@@ -78,10 +80,15 @@ VLM_MAX_TOKENS_PROMPT_WRITER = 5120
 VLM_MAX_TOKENS_DESCRIBER = 15000
 
 # ---------------------------------------------------------------------------
-# JoyAI configuration (image edit model, diffusers JoyImageEditPipeline)
+# JoyAI configuration (image edit model, loaded from the JoyAI-Image repo
+# code via infer_runtime / modules -- NOT through diffusers)
 # ---------------------------------------------------------------------------
-# Diffusers-format checkpoint directory. Env: JOYAI_CKPT_ROOT
-JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit-Diffusers/")
+# Checkpoint root for the JoyAI image-edit model. Env: JOYAI_CKPT_ROOT
+JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit/")
+
+# Root of the JoyAI-Image source repository. Its `src` subdirectory is added
+# to sys.path so `infer_runtime` / `modules` resolve. Env: JOYAI_SRC_DIR
+JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "/remote-home/Zhangkaile/dev/JoyAI-Image")
 
 # GPU card for JoyAI, e.g. "cuda:2". Leave None to auto-detect the freest
 # card at runtime. This is the only local model — the VLM is remote — so no
@@ -89,8 +96,8 @@ JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/J
 JOYAI_DEVICE = os.environ.get("JOYAI_DEVICE")
 
 JOYAI_BASE_SEED = 42
-JOYAI_STEPS = 40
-JOYAI_GUIDANCE_SCALE = 4.0
+JOYAI_STEPS = 30
+JOYAI_GUIDANCE_SCALE = 5.0
 
 # ---------------------------------------------------------------------------
 # Bounding box normalization

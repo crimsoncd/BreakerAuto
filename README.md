@@ -29,9 +29,10 @@ Every stage reads and writes one shared [`SceneGraph`](scene_graph.py) object; e
 - **Hardware**: one GPU with enough VRAM for JoyAI (~80G-class). The VLM runs remotely through the Bailian API, so it needs no local GPU and no co-residence constraint. (The reference box was 4× A100 80G; spare cards can host a second JoyAI worker to parallelize element extraction.)
 - **API key**: a Bailian API key in the git-ignored `.env` file as `BAILIAN_API_KEY` (loaded at import time; see `config.py`).
 - **Model / code**, pointed at from `config.py`:
-  - The **JoyAI-Image** release in **Diffusers format** (a checkpoint directory loadable via `diffusers.JoyImageEditPipeline`; no private package build required).
+  - The **JoyAI-Image** release checkpoint (`JOYAI_CKPT_ROOT`) plus a local clone of the **JoyAI-Image source repo** (`JOYAI_SRC_DIR`, loaded via its `infer_runtime` / `modules` code — the original deployment; the diffusers `JoyImageEditPipeline` route was tried and impaired quality, so it was reverted).
+  - That source repo additionally needs `flash_attn` installed in the environment.
 - **Python 3.10+** with the packages in [`requirements.txt`](requirements.txt) (or install this repo as a package via `pip install -e .`).
-- **Reference environment**: the conda env `JoyNew` (`/remote-home/Zhangkaile/miniconda3/envs/JoyNew/bin/python`) — it ships the diffusers build with `JoyImageEditPipeline` and the `openai` client the wrappers rely on (see [`MODELS_AND_RESOURCES.md`](MODELS_AND_RESOURCES.md)).
+- **Reference environment**: the conda env `JoyNew` (`/remote-home/Zhangkaile/miniconda3/envs/JoyNew/bin/python`) — it ships the `openai` client and the torch/diffusers stack the wrappers rely on (see [`MODELS_AND_RESOURCES.md`](MODELS_AND_RESOURCES.md)).
 
 ---
 
@@ -54,14 +55,16 @@ the environment variables **or** edit `config.py` directly — don't do both:
 ```bash
 # .env (git-ignored) — Bailian API key for the VLM:
 #   BAILIAN_API_KEY=sk-...
-export JOYAI_CKPT_ROOT=/path/to/JoyAI-Image-Edit-Diffusers   # Diffusers-format checkpoint
+export JOYAI_CKPT_ROOT=/path/to/JoyAI-Image-Edit          # checkpoint root
+export JOYAI_SRC_DIR=/path/to/JoyAI-Image                 # clone of the JoyAI-Image repo
 export JOYAI_DEVICE=cuda:2                          # optional, else auto-detected
 ```
 
 Editing `config.py` instead looks like this:
 
 ```python
-JOYAI_CKPT_ROOT = "/path/to/JoyAI-Image-Edit-Diffusers"
+JOYAI_CKPT_ROOT = "/path/to/JoyAI-Image-Edit"
+JOYAI_SRC_DIR = "/path/to/JoyAI-Image"
 ```
 
    > Only JoyAI runs locally, so a single GPU suffices. If you don't set `JOYAI_DEVICE`, the pipeline picks the card with the most free memory at startup.
@@ -130,7 +133,8 @@ Everything below lives in [`config.py`](config.py). Env vars (if set) override t
 | `VLM_BASE_URL` | `VLM_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI-compatible endpoint for the VLM |
 | `VLM_API_KEY` | `BAILIAN_API_KEY` | — (from `.env`) | API key for the VLM endpoint |
 | `VLM_MODEL_NAME` | `VLM_MODEL_NAME` | `qwen3.7-flash` | Model name served by the endpoint |
-| `JOYAI_CKPT_ROOT` | `JOYAI_CKPT_ROOT` | `/remote-home/Zhangkaile/models/JoyAI-Image-Edit-Diffusers/` | JoyAI Diffusers-format checkpoint dir |
+| `JOYAI_CKPT_ROOT` | `JOYAI_CKPT_ROOT` | `/remote-home/Zhangkaile/models/JoyAI-Image-Edit/` | JoyAI checkpoint dir (loaded via the JoyAI-Image repo code) |
+| `JOYAI_SRC_DIR` | `JOYAI_SRC_DIR` | `/remote-home/Zhangkaile/dev/JoyAI-Image` | Root of the JoyAI-Image source repo (its `src` goes on `sys.path`) |
 | `JOYAI_DEVICE` | `JOYAI_DEVICE` | auto-detect | GPU card for JoyAI (the only local model) |
 | `JOYAI_BASE_SEED` | — | `42` | base seed; bumped on retries |
 | `ELEMENT_RETRIES` | — | `3` | max per-element generation attempts |
@@ -163,7 +167,7 @@ Every VLM prompt+response, every JoyAI input/output, and every intermediate matt
 ## Utility scripts
 
 - [`call_bailian_vlm.py`](call_bailian_vlm.py) — the VLM wrapper (Bailian API, qwen3.7-flash); also a small `__main__` sanity CLI: `python call_bailian_vlm.py --image in.png --prompt "..."`.
-- [`call_JoyAI.py`](call_JoyAI.py) — importable `JoyEdit` / `JoyEditBatch` wrappers around the diffusers `JoyImageEditPipeline` (also a small `__main__` sanity CLI).
+- [`call_JoyAI.py`](call_JoyAI.py) — importable `JoyEdit` / `JoyEditBatch` wrappers around the original JoyAI-Image repo-code deployment (`infer_runtime` / `modules`; also a small `__main__` sanity CLI).
 - [`cleaner.py`](cleaner.py) — sort finished run folders into a flat, metadata-annotated dataset: `python cleaner.py --input runsreal/<collection> --output cleaned/ --code C`.
 - [`gather_reconstruction.py`](gather_reconstruction.py) — copy the final reconstruction from many run folders into one directory.
 - [`collage_svg.py`](collage_svg.py) — rebuild SVG collages from layerwise `metadata.json` files.
