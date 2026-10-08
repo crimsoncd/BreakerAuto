@@ -1,9 +1,16 @@
 __pycache__/
 .vscode/
+.mimocode/
+
+.env
 
 logs/
 runs/
 runsreal/
+runs_faketest/
+runsorder/
+run*/
 reconstruction/
 
 cleaned/
+runs_apitest/

@@ -1,8 +1,9 @@
 """
 Logger module — writes every intermediate result to a run folder for traceability.
 
-Non-negotiable per spec: every VLM prompt+response, every JoyAI input+output,
-every intermediate matte, and every reconstruction must be logged.
+Non-negotiable per spec: every VLM prompt+response, every edit-model
+input+output, every intermediate matte, and every reconstruction must be
+logged.
 """
 from __future__ import annotations
 

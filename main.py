@@ -35,6 +35,7 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
     print(f"# IMAGE: {image_path.name}")
     print("#" * 70)
 
+    t0 = time.time()
     result = run_pipeline(
         image_path=str(image_path),
         output_dir=output_dir,
@@ -42,13 +43,17 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
         use_verify=use_verify,
         use_global=use_global,
     )
+    elapsed = time.time() - t0
 
     print(f"\n  Run dir:        {result['run_dir']}")
+    if result.get("package_dir"):
+        print(f"  Package:        {result['package_dir']}")
     print(f"  Reconstruction: {result['reconstruction']}")
     print(f"  Elements:       {len(result['elements'])}")
     done = sum(1 for e in result["elements"] if e["status"] == "done")
     failed = sum(1 for e in result["elements"] if e["status"] == "failed")
     print(f"  Done: {done}, Failed: {failed}")
+    print(f"  Total time:     {elapsed:.1f}s")
     return result
 
 

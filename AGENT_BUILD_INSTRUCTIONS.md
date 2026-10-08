@@ -16,7 +16,12 @@ Reconstruction test: compositing all elements front-to-back over the background 
 
 ## 2. Models / runtime
 
-- **VLM**: Qwen3VL-32B — all perception and judgment (planning, checks, prompt-writing). One model, many roles, differentiated only by system prompt (see `SYSTEM_PROMPTS.md`).
+> **Status update:** the VLM is no longer the local Qwen3.8-27B — it now runs
+> remotely via the Bailian API (default model `qwen3.7-flash`, see
+> `call_bailian_vlm.py`), so only JoyAI needs a local GPU. Everything below
+> about device co-residence applies to JoyAI alone.
+
+- **VLM**: qwen3.7-flash via the Bailian (DashScope) OpenAI-compatible API — all perception and judgment (planning, checks, prompt-writing). One model, many roles, differentiated only by system prompt (see `prompts.py`).
 - **Edit model**: JoyAI — all generative isolation, amodal completion, and background fill.
 - **DIP**: classical CV (OpenCV/PIL) — plain-bg → alpha matting, cropping, resizing, compositing. No ML.
 - **Hardware**: 4× A100 80G. Models can be held resident; calls are local. Treat both model calls as expensive though — budget them. See `MODELS_AND_RESOURCES.md` for detail.
@@ -34,11 +39,11 @@ SceneGraph
   global_attempts: int
 
 Element
-  id: str                      # stable unique handle, e.g. "girl_01" — assigned once, never reused
+  id: str                      # stable unique handle, e.g. "element_01" — derived from the planner's `order`, assigned once, never reused
   name: str                    # object-level label
   bbox: [xmin, ymin, xmax, ymax]           # from planner
-  depth_rank: int              # 1 = frontmost
-  overlaps: [element_id, ...]  # which other elements this one overlaps
+  order: int                   # drawing order from the planner; higher = drawn later = frontmost (background is order 0)
+  overlaps: [element_name, ...]  # derived from bbox geometry (intersecting + drawn later)
   isolation_prompt: str|null
   layer_path: str|null         # final RGBA cutout
   status: enum {planned, extracting, done, failed}
@@ -54,13 +59,13 @@ Always remember bbox is in [xmin, ymin, xmax, ymax] format, the numbers normaliz
 
 ### Stage 1 — Planning
 - Input: original image.
-- Call VLM (Planner prompt) → returns the full element list with `name`, `bbox`, `depth_rank`, `overlaps`.
+- Call VLM (Planner prompt) → returns a `layout` list with `order`, `name`, `bbox`, `description`; order 0 is the background, 1..N are objects. Overlaps are derived afterwards from bbox geometry.
 - Output: populated SceneGraph.
 - Enforce object-level granularity via the prompt's few-shot examples.
 - This stage is **reopenable** by Stage 4 (to add a missed element).
 
-### Stage 2 — Element extraction (loop, process front-to-back by depth_rank)
-For each element, in depth order:
+### Stage 2 — Element extraction (loop, process front-to-back by `order`)
+For each element, frontmost (highest `order`) first:
 1. **Occupancy check** (VLM): crop bbox (×1.1), ask whether other named elements intrude into this crop. Output: list of contaminant names. *(This replaces the bbox-tightness check — we trust the box, we check for contamination.)*
 2. **Write isolation prompt** (VLM): given the element name, the crop, and the contaminant list, produce a JoyAI instruction that (a) isolates THIS object, (b) names the specific things to exclude, (c) requests amodal completion of any occluded parts.
 3. **Generate** (JoyAI): run the isolation prompt on the crop → isolated object on plain bg.
@@ -72,11 +77,11 @@ For each element, in depth order:
 - Same verify/retry loop (max 3), reference = original image.
 
 ### Stage 4 — Reassembly + global verification (master loop)
-1. Composite: background at bottom, then elements by depth_rank (back-to-front when drawing).
+1. Composite: background at bottom, then elements by ascending `order` (back-to-front when drawing).
 2. **Global verify** (VLM): compare reconstruction to original. Route:
    - region in original but missing from reconstruction → **reopen Stage 1**: add the missed element (new `id`), run it through Stage 2.
    - a specific layer reads wrong → re-run that element's Stage 2 loop with the noted defect.
-   - z-order wrong → adjust depth_rank and recomposite only.
+   - z-order wrong → swap `order` values and recomposite only.
 3. Terminate when reconstruction acceptable OR `global_attempts` budget hit. On budget exhaustion, ship best partial + flag unresolved elements.
 
 ## 5. Tool interface (build these as plain functions; no agent framework needed for v0)

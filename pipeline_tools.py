@@ -3,13 +3,17 @@ Pipeline tools — the 6 core functions that all stages use.
 
 Tools:
   vlm(system_prompt, image(s), user_text) -> str
-  joyai(image, prompt) -> image
+  qwen_edit(image, prompt) -> image
   crop(image, bbox, pad=0.1) -> image
   matte_to_alpha(image_on_plain_bg) -> RGBA
   resize(image, size) -> image
   composite(background, [layers_in_z_order]) -> image
 
 Plus JSON parsing utilities for the VLM outputs.
+
+The VLM is a remote Bailian (DashScope) API model — see call_bailian_vlm.py.
+It keeps the same call signature as the old local Qwen3.8 wrapper, so the
+pipeline logic is unchanged; only the transport differs.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 import traceback
 from pathlib import Path
 from typing import Optional, Union
@@ -24,69 +29,58 @@ from typing import Optional, Union
 import numpy as np
 from PIL import Image
 
-from call_Qwen3VL import Qwen3VL_inference
-from call_JoyAI import JoyEdit
+from call_bailian_vlm import BailianVLM_inference
+from call_qwen_edit import QwenEdit
 from config import (
-    BBOX_NORM, JOYAI_BASE_SEED,
-    QWEN_DEVICE as _QWEN_DEVICE,
-    JOYAI_DEVICE as _JOYAI_DEVICE,
+    BBOX_NORM, QWEN_EDIT_BASE_SEED,
+    QWEN_EDIT_DEVICE as _QWEN_EDIT_DEVICE,
 )
 
 import rembg
 
-# Device assignments. Seeded from config; resolved at runtime by
-# auto_detect_gpu_devices() when both are None.
-QWEN_DEVICE, JOYAI_DEVICE = _QWEN_DEVICE, _JOYAI_DEVICE
+# Edit model's device. Seeded from config/env; resolved at runtime by
+# resolve_edit_device() when None. The VLM is remote (Bailian API), so the
+# Qwen-Image-2.1 edit model is the only local model and a single GPU suffices.
+EDIT_DEVICE = _QWEN_EDIT_DEVICE
 
 
-def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> tuple[str, str]:
-    """Detect free GPUs and assign VLM to one, JoyAI to another.
+def resolve_edit_device(force: str = None) -> str:
+    """Resolve the GPU card for the Qwen-Image-2.1 edit model — the only local
+    model in the pipeline.
 
-    Strategy: Query `nvidia-smi` for free memory. Pick the two cards with
-    the most available memory as candidates. Config/env device values
-    (config.QWEN_DEVICE / config.JOYAI_DEVICE) always win over detection.
+    The VLM runs remotely via the Bailian API, so no second card is needed
+    and there is no co-residence constraint anymore.
+
+    Priority: explicit `force` argument > config.QWEN_EDIT_DEVICE (env
+    QWEN_EDIT_DEVICE) > auto-detect the card with the most free memory.
     """
+    global EDIT_DEVICE
 
-    global QWEN_DEVICE, JOYAI_DEVICE
+    if EDIT_DEVICE is not None:
+        print(f"[GPU] Edit-model device (pre-set): {EDIT_DEVICE}")
+        return EDIT_DEVICE
 
-    # Config/env values take precedence over auto-detection.
-    force_qwen = force_qwen or _QWEN_DEVICE
-    force_joyai = force_joyai or _JOYAI_DEVICE
-
-    if QWEN_DEVICE is not None and JOYAI_DEVICE is not None:
-        print("Using current devices")
-        print("Qwen:", QWEN_DEVICE)
-        print("JoyAI:", JOYAI_DEVICE)
-        return QWEN_DEVICE, JOYAI_DEVICE
-
-    if force_qwen and force_joyai:
-        QWEN_DEVICE = force_qwen
-        JOYAI_DEVICE = force_joyai
-        print(f"[GPU] Manual override: VLM={QWEN_DEVICE}, JoyAI={JOYAI_DEVICE}")
-        return QWEN_DEVICE, JOYAI_DEVICE
+    force = force or _QWEN_EDIT_DEVICE
+    if force:
+        EDIT_DEVICE = force
+        print(f"[GPU] Edit-model device (manual override): {EDIT_DEVICE}")
+        return EDIT_DEVICE
 
     try:
         import torch
         if not torch.cuda.is_available():
-            print("[GPU] No CUDA available — using CPU fallback")
-            QWEN_DEVICE = force_qwen or "cpu"
-            JOYAI_DEVICE = force_joyai or "cpu"
-            return QWEN_DEVICE, JOYAI_DEVICE
+            print("[GPU] No CUDA available — edit model falling back to CPU")
+            EDIT_DEVICE = "cpu"
+            return EDIT_DEVICE
 
-        n_gpus = torch.cuda.device_count()
-        if n_gpus < 2:
-            print(f"[GPU] Only {n_gpus} GPU(s) detected — both models on cuda:0")
-            QWEN_DEVICE = force_qwen or "cuda:0"
-            JOYAI_DEVICE = force_joyai or "cuda:0"
-            return QWEN_DEVICE, JOYAI_DEVICE
-
-        # Query nvidia-smi for utilization and memory
+        # Query nvidia-smi for memory; pick the card with the most free memory.
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,memory.total",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10, check=True
         )
-        
+
+        n_gpus = torch.cuda.device_count()
         gpu_stats = []
         for line in result.stdout.strip().split("\n"):
             if not line.strip():
@@ -94,57 +88,28 @@ def auto_detect_gpu_devices(force_qwen: str = None, force_joyai: str = None) -> 
             parts = [x.strip() for x in line.split(",")]
             if len(parts) >= 4:
                 idx = int(parts[0])
-                
                 # If CUDA_VISIBLE_DEVICES is set, the physical index may exceed
                 # what torch sees. Filter out such indices safely.
                 if idx >= n_gpus:
                     continue
-                    
                 util = float(parts[1])
                 mem_used = float(parts[2])
                 mem_total = float(parts[3])
-                mem_free = mem_total - mem_used
-                
-                gpu_stats.append((idx, util, mem_free))
+                gpu_stats.append((idx, util, mem_total - mem_used))
 
-        # Sort by most free memory first, then lowest utilization.
-        gpu_stats.sort(key=lambda x: (-x[2], x[1]))
-
-        # Degrade gracefully if no usable cards remain after filtering.
         if not gpu_stats:
             raise RuntimeError("No matching GPUs found after filtering.")
 
-        if len(gpu_stats) >= 2:
-            vlm_idx = gpu_stats[0][0]
-            joyai_idx = gpu_stats[1][0]
-        else:
-            vlm_idx = gpu_stats[0][0]
-            joyai_idx = gpu_stats[0][0]
-
-        QWEN_DEVICE = f"cuda:{vlm_idx}"
-        JOYAI_DEVICE = f"cuda:{joyai_idx}"
-
-        # Config/env explicit assignments win over auto-detection.
-        if force_qwen:
-            QWEN_DEVICE = force_qwen
-        if force_joyai:
-            JOYAI_DEVICE = force_joyai
-        
-        print(f"[GPU] Auto-detected: VLM={QWEN_DEVICE}, JoyAI={JOYAI_DEVICE}")
-
-        print("Using Device:")
-        print("Qwen:", QWEN_DEVICE)
-        print("JoyAI:", JOYAI_DEVICE)
+        # Most free memory first, then lowest utilization.
+        gpu_stats.sort(key=lambda x: (-x[2], x[1]))
+        EDIT_DEVICE = f"cuda:{gpu_stats[0][0]}"
+        print(f"[GPU] Auto-detected edit-model device: {EDIT_DEVICE}")
 
     except Exception as e:
-        # Safe fallback if detection fails.
-        if QWEN_DEVICE is None:
-            QWEN_DEVICE = force_qwen or "cuda:0"
-        if JOYAI_DEVICE is None:
-            JOYAI_DEVICE = force_joyai or "cuda:0"
-        print(f"[GPU] Error occurred ({e}) — fallback to defaults QWEN={QWEN_DEVICE} JOYAI={JOYAI_DEVICE}")
+        EDIT_DEVICE = "cuda:0"
+        print(f"[GPU] Error occurred ({e}) — edit-model fallback device: {EDIT_DEVICE}")
 
-    return QWEN_DEVICE, JOYAI_DEVICE
+    return EDIT_DEVICE
 
 
 
@@ -189,14 +154,18 @@ def vlm_json(system_prompt: str, image_input, user_text: str,
     Returns parsed dict (empty dict on total failure).
     Logs the call if logger is provided.
     """
-    response = Qwen3VL_inference(
+    n_imgs = 0 if image_input is None else (
+        len(image_input) if isinstance(image_input, (list, tuple)) else 1)
+    print(f"[VLM] {role}: sending request ({n_imgs} image(s), max_tokens={max_new_tokens})...")
+    t0 = time.time()
+    response = BailianVLM_inference(
         image_input=image_input,
         prompt=user_text,
         system_prompt=system_prompt,
         max_new_tokens=max_new_tokens,
         deterministic=True,
-        device=QWEN_DEVICE
     )
+    print(f"[VLM] {role}: response received in {time.time() - t0:.1f}s")
     if logger:
         logger.log_vlm_call(
             role=role,
@@ -209,15 +178,17 @@ def vlm_json(system_prompt: str, image_input, user_text: str,
     if result is not None:
         return result
     # One explicit reformat-retry
+    print(f"[VLM] {role}: JSON parse failed — reformat retry...")
     retry_prompt = f"{user_text}\n\nIMPORTANT: Return ONLY valid JSON, no markdown fences, no other text."
-    response2 = Qwen3VL_inference(
+    t1 = time.time()
+    response2 = BailianVLM_inference(
         image_input=image_input,
         prompt=retry_prompt,
         system_prompt=system_prompt,
         max_new_tokens=max_new_tokens,
         deterministic=True,
-        device=QWEN_DEVICE
     )
+    print(f"[VLM] {role}: reformat retry done in {time.time() - t1:.1f}s")
     if logger:
         logger.log_vlm_call(
             role=f"{role}_retry",
@@ -246,14 +217,16 @@ def vlm(system_prompt: str, image_input, user_text: str,
         max_new_tokens: int = 512,
         logger=None) -> str:
     """Call the VLM and return raw text response. Logs if logger provided."""
-    response = Qwen3VL_inference(
+    print(f"[VLM] vlm_text: sending request (max_tokens={max_new_tokens})...")
+    t0 = time.time()
+    response = BailianVLM_inference(
         image_input=image_input,
         prompt=user_text,
         system_prompt=system_prompt,
         max_new_tokens=max_new_tokens,
         deterministic=True,
-        device=QWEN_DEVICE
     )
+    print(f"[VLM] vlm_text: response received in {time.time() - t0:.1f}s")
     if logger:
         logger.log_vlm_call(
             role="vlm_text",
@@ -265,21 +238,28 @@ def vlm(system_prompt: str, image_input, user_text: str,
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: JoyAI (the only edit entrypoint)
+# Tool 2: Qwen-Image-2.1 edit (the only edit entrypoint)
 # ---------------------------------------------------------------------------
-def joyai(image: ImageLike, prompt: str, output_path: Optional[str | Path] = None,
-          seed: int = JOYAI_BASE_SEED, device: Optional[str] = None,
-          logger=None) -> Optional[Image.Image]:
-    """Run JoyAI edit. Returns PIL Image or None on failure.
+def qwen_edit(image: ImageLike, prompt: str, output_path: Optional[str | Path] = None,
+              seed: int = QWEN_EDIT_BASE_SEED, device: Optional[str] = None,
+              logger=None) -> Optional[Image.Image]:
+    """Run the Qwen-Image-2.1 edit. Returns PIL Image or None on failure.
 
-    Uses the auto-detected JOYAI_DEVICE by default; pass device= to override.
+    The pipeline is loaded lazily on the first call and kept resident for the
+    rest of the task. The model may emit a different output size than the
+    input; the result is always resized back to the exact input size (done
+    inside QwenEdit).
+
+    Uses the auto-detected EDIT_DEVICE by default; pass device= to override.
     """
     if device is None:
-        device = JOYAI_DEVICE  # use globally-resolved device
+        device = EDIT_DEVICE  # use globally-resolved device
     if logger and prompt:
-        logger.log_text(prompt, label="joyai_prompt")
+        logger.log_text(prompt, label="edit_prompt")
+    print(f"[QwenEdit] editing started (device={device}, seed={seed}): {prompt[:80]}")
+    t0 = time.time()
     try:
-        result = JoyEdit(
+        result = QwenEdit(
             image=image,
             prompt=prompt,
             output_path=str(output_path) if output_path else None,
@@ -287,12 +267,13 @@ def joyai(image: ImageLike, prompt: str, output_path: Optional[str | Path] = Non
             seed=seed,
         )
         if result.ok and result.image is not None:
+            print(f"[QwenEdit] editing done in {time.time() - t0:.1f}s")
             return result.image
         else:
-            print(f"[JoyAI] Edit failed: {result.error}")
+            print(f"[QwenEdit] editing FAILED after {time.time() - t0:.1f}s: {result.error}")
             return None
     except Exception as e:
-        print(f"[JoyAI] Exception: {e}")
+        print(f"[QwenEdit] editing EXCEPTION after {time.time() - t0:.1f}s: {e}")
         traceback.print_exc()
         return None
 
@@ -356,7 +337,9 @@ def matte_to_alpha(image_on_plain_bg: ImageLike) -> Image.Image:
         img = Image.open(img)
     img = img.convert('RGB')
 
+    t0 = time.time()
     output = rembg.remove(img)
+    print(f"[Matte] rembg matting done in {time.time() - t0:.1f}s")
 
     return output
 
@@ -460,13 +443,35 @@ def set_fake_mode(on: bool = True) -> None:
 def _fake_vlm(system_prompt: str, image_input, user_text: str,
               max_new_tokens: int = 512, logger=None) -> str:
     """Stub VLM that returns canned JSON."""
+    # Layout describer — must be checked first: its prompt mentions several
+    # phrases shared with other roles (background, foreground objects).
+    if "scene describer" in system_prompt.lower():
+        # Element ids arrive inside the {element_summaries} JSON payload.
+        ids = re.findall(r'"id":\s*"([^"]+)"', system_prompt)
+        return json.dumps({
+            "description": "A flat-style illustration of a simple outdoor scene: a girl stands on a grassy field beside a tree under a bright open sky.",
+            "background": {
+                "name": "bright sky and open field",
+                "description": "A plain outdoor backdrop with soft sky tones above an empty grassy field and no foreground objects.",
+            },
+            "global_style": {"color_scheme": "Bright natural tones", "mood": "Calm and cheerful"},
+            "elements": [
+                {"id": i, "description": f"Layout item {i} placed in the scene."}
+                for i in ids
+            ],
+        })
     # Return different canned responses based on what the system prompt contains
     if "scene analyst" in system_prompt.lower():
         return json.dumps({
-            "elements": [
-                {"name": "girl", "bbox": [200, 50, 450, 600], "depth_rank": 1, "overlaps": ["grass"]},
-                {"name": "tree", "bbox": [600, 30, 900, 500], "depth_rank": 2, "overlaps": ["grass"]},
-                {"name": "grass", "bbox": [0, 400, 1000, 1000], "depth_rank": 3, "overlaps": []},
+            "layout": [
+                {"order": 0, "name": "bright_sky_background", "bbox": [0, 0, 1000, 1000],
+                 "description": "A flat-style illustration of a simple outdoor scene: a girl stands on a grassy field beside a tree under a bright open sky."},
+                {"order": 1, "name": "grassy_field", "bbox": [0, 400, 1000, 1000],
+                 "description": "The grassy field covering the lower part of the scene."},
+                {"order": 2, "name": "tree", "bbox": [600, 30, 900, 500],
+                 "description": "A leafy tree on the right side of the scene."},
+                {"order": 3, "name": "girl", "bbox": [200, 50, 450, 600],
+                 "description": "A girl standing on the grassy field in the foreground."},
             ]
         })
     if "occupancy" in system_prompt.lower() or "intrude" in system_prompt.lower():
@@ -484,9 +489,9 @@ def _fake_vlm(system_prompt: str, image_input, user_text: str,
     return "{}"
 
 
-def _fake_joyai(image: ImageLike, prompt: str, output_path=None, seed=42,
-                device="cuda:1", logger=None) -> Optional[Image.Image]:
-    """Stub JoyAI that returns the input image unchanged."""
+def _fake_qwen_edit(image: ImageLike, prompt: str, output_path=None, seed=42,
+                    device="cuda:1", logger=None) -> Optional[Image.Image]:
+    """Stub edit model that returns the input image unchanged."""
     if isinstance(image, (str, Path)):
         img = Image.open(image)
     else:

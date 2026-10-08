@@ -31,29 +31,31 @@ class BackgroundStatus(Enum):
 class Element:
     """One element/layer extracted from the illustration."""
 
-    id: str                                 # stable unique handle, e.g. "girl_01"
-    name: str                               # object-level label
+    id: str                                 # stable unique handle, e.g. "element_01" (one-and-only label)
+    name: str                               # object-level label from the planner
     bbox: list[int]                         # [xmin, ymin, xmax, ymax] normalized to 0-1000
-    depth_rank: int                         # 1 = frontmost
+    order: int                              # drawing order from the planner; higher = drawn later = frontmost
     overlaps: list[str] = field(default_factory=list)  # names of elements this one overlaps
     isolation_prompt: Optional[str] = None
     layer_path: Optional[str] = None       # final RGBA cutout
     status: ElementStatus = ElementStatus.PLANNED
     attempts: int = 0
     defects: list[str] = field(default_factory=list)
+    description: Optional[str] = None          # short one-sentence item description (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
             "id": self.id,
             "name": self.name,
             "bbox": self.bbox,
-            "depth_rank": self.depth_rank,
+            "order": self.order,
             "overlaps": self.overlaps,
             "isolation_prompt": self.isolation_prompt,
             "layer_path": self.layer_path,
             "status": self.status.value,
             "attempts": self.attempts,
             "defects": self.defects,
+            "description": self.description,
         }
 
     @classmethod
@@ -62,13 +64,14 @@ class Element:
             id=d["id"],
             name=d["name"],
             bbox=d["bbox"],
-            depth_rank=d["depth_rank"],
+            order=d.get("order", d.get("depth_rank", 1)),
             overlaps=d.get("overlaps", []),
             isolation_prompt=d.get("isolation_prompt"),
             layer_path=d.get("layer_path"),
             status=ElementStatus(d.get("status", "planned")),
             attempts=d.get("attempts", 0),
             defects=d.get("defects", []),
+            description=d.get("description"),
         )
 
 
@@ -81,6 +84,8 @@ class Background:
     status: BackgroundStatus = BackgroundStatus.PLANNED
     attempts: int = 0
     defects: list[str] = field(default_factory=list)
+    name: Optional[str] = None                 # short noun phrase for the background (dataset metadata)
+    description: Optional[str] = None          # one-sentence background description (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
@@ -89,6 +94,8 @@ class Background:
             "status": self.status.value,
             "attempts": self.attempts,
             "defects": self.defects,
+            "name": self.name,
+            "description": self.description,
         }
 
     @classmethod
@@ -99,6 +106,8 @@ class Background:
             status=BackgroundStatus(d.get("status", "planned")),
             attempts=d.get("attempts", 0),
             defects=d.get("defects", []),
+            name=d.get("name"),
+            description=d.get("description"),
         )
 
 
@@ -112,6 +121,8 @@ class SceneGraph:
     elements: list[Element] = field(default_factory=list)
     global_attempts: int = 0
     enum_reopenings: int = 0                # count of Stage-1 reopenings
+    image_description: Optional[str] = None  # overall scene description (dataset metadata)
+    global_style: Optional[dict] = None      # {color_scheme, mood} (dataset metadata)
 
     def to_dict(self) -> dict:
         return {
@@ -121,6 +132,8 @@ class SceneGraph:
             "elements": [e.to_dict() for e in self.elements],
             "global_attempts": self.global_attempts,
             "enum_reopenings": self.enum_reopenings,
+            "image_description": self.image_description,
+            "global_style": self.global_style,
         }
 
     @classmethod
@@ -134,6 +147,8 @@ class SceneGraph:
             elements=elements,
             global_attempts=d.get("global_attempts", 0),
             enum_reopenings=d.get("enum_reopenings", 0),
+            image_description=d.get("image_description"),
+            global_style=d.get("global_style"),
         )
 
     def save(self, path: str | Path) -> None:
@@ -165,8 +180,16 @@ class SceneGraph:
         return None
 
     def sorted_elements(self) -> list[Element]:
-        """Return elements sorted by depth_rank (1 = frontmost first, then deeper)."""
-        return sorted(self.elements, key=lambda e: e.depth_rank)
+        """Return elements sorted front-to-back (highest order = frontmost first)."""
+        return sorted(self.elements, key=lambda e: -e.order)
+
+    def back_to_front(self) -> list[Element]:
+        """Return elements sorted back-to-front (ascending order; draw order)."""
+        return sorted(self.elements, key=lambda e: e.order)
+
+    def max_order(self) -> int:
+        """Highest element order currently in the graph (0 if empty)."""
+        return max((e.order for e in self.elements), default=0)
 
     def next_available_id(self) -> str:
         """Generate a unique element id."""

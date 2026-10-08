@@ -10,20 +10,19 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 dependencies = [
+    "torch>=2.8.0",
+    "torchvision",
+    "diffusers>=0.41.0",
+    "transformers>=4.57.0",
     "accelerate",
-    "diffusers==0.36.0",
     "einops",
     "loguru",
     "numpy",
     "packaging",
     "pillow",
-    "qwen-vl-utils",
     "rembg",
     "safetensors",
     "sentencepiece",
-    "torch==2.8.0",
-    "torchvision",
-    "transformers>=4.57.0,<4.58.0",
 ]
 
 [project.optional-dependencies]
@@ -34,13 +33,13 @@ rewrite = ["openai"]
 decompose = "main:main"
 
 # This repo uses a flat, top-level-module layout (no package directory), so
-# the modules are listed explicitly. The `joyai-image-release` package is a
-# prerequisite and is NOT a dependency here because it is not on PyPI; install
-# it first (see README) or point JOYAI_SRC_DIR at a clone.
+# the modules are listed explicitly. The Qwen-Image-2.1 edit model loads via
+# diffusers (QwenImage21Pipeline from config.QWEN_EDIT_CKPT_ROOT) — no
+# separate source repo is needed.
 [tool.setuptools]
 py-modules = [
-    "call_JoyAI",
-    "call_Qwen3VL",
+    "call_bailian_vlm",
+    "call_qwen_edit",
     "cleaner",
     "collage_svg",
     "config",
