@@ -1,12 +1,10 @@
 # -----------------------------------------------------------------------------
 # Layer-decomposition pipeline dependencies.
 #
-# The JoyAI image-edit model loads from the original JoyAI-Image source repo
-# (infer_runtime / modules, added to sys.path by call_JoyAI.py from
-# config.JOYAI_SRC_DIR) — no pip-installable JoyAI package is needed; just
-# point JOYAI_CKPT_ROOT at the checkpoint dir and JOYAI_SRC_DIR at your clone
-# of the repo. The repo code hard-imports flash_attn, so install a matching
-# wheel for your torch/CUDA build (one ships inside the checkpoint dir).
+# The image-edit model is Qwen-Image-2.1, loaded via diffusers
+# (QwenImage21Pipeline, see call_qwen_edit.py) — point
+# QWEN_EDIT_CKPT_ROOT at the checkpoint dir. No source-repo clone or
+# flash_attn wheel is needed anymore.
 #
 # The VLM runs remotely via the Bailian (DashScope) API.
 # -----------------------------------------------------------------------------

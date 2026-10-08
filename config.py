@@ -8,10 +8,9 @@ entry), so you never have to edit this file to run on a new machine.
 
 Before the first run, point at least these at your resources:
   * BAILIAN_API_KEY -- in the git-ignored .env file (key for the Bailian VLM API).
-  * JOYAI_CKPT_ROOT -- checkpoint directory of the JoyAI image-edit model
-                       (the original release, loaded via the JoyAI-Image repo
-                       code -- see call_JoyAI.py).
-  * JOYAI_SRC_DIR   -- root of your local clone of the JoyAI-Image repo.
+  * QWEN_EDIT_CKPT_ROOT -- checkpoint directory of the Qwen-Image-2.1
+                           image-edit model (loaded via diffusers -- see
+                           call_qwen_edit.py).
 """
 
 import os
@@ -71,7 +70,7 @@ VLM_BASE_URL = _from_env(
 VLM_API_KEY = _from_env("BAILIAN_API_KEY", "")
 
 # Model name served by the endpoint. Env: VLM_MODEL_NAME
-VLM_MODEL_NAME = _from_env("VLM_MODEL_NAME", "qwen3.7-flash")
+VLM_MODEL_NAME = _from_env("VLM_MODEL_NAME", "qwen3.7-flash-2026-07-15")
 
 VLM_SYSTEM_PROMPT = ""  # filled per role
 VLM_MAX_TOKENS_PLANNER = 15000
@@ -80,24 +79,26 @@ VLM_MAX_TOKENS_PROMPT_WRITER = 5120
 VLM_MAX_TOKENS_DESCRIBER = 15000
 
 # ---------------------------------------------------------------------------
-# JoyAI configuration (image edit model, loaded from the JoyAI-Image repo
-# code via infer_runtime / modules -- NOT through diffusers)
+# Qwen-Image-2.1 configuration (image edit model, loaded via diffusers
+# QwenImage21Pipeline -- see call_qwen_edit.py)
 # ---------------------------------------------------------------------------
-# Checkpoint root for the JoyAI image-edit model. Env: JOYAI_CKPT_ROOT
-JOYAI_CKPT_ROOT = _from_env("JOYAI_CKPT_ROOT", "/remote-home/Zhangkaile/models/JoyAI-Image-Edit/")
+# Checkpoint root for the Qwen-Image-2.1 image-edit model.
+# Env: QWEN_EDIT_CKPT_ROOT
+QWEN_EDIT_CKPT_ROOT = _from_env(
+    "QWEN_EDIT_CKPT_ROOT", "/remote-home/Zhangkaile/models/Qwen-Image-2.1/"
+)
 
-# Root of the JoyAI-Image source repository. Its `src` subdirectory is added
-# to sys.path so `infer_runtime` / `modules` resolve. Env: JOYAI_SRC_DIR
-JOYAI_SRC_DIR = _from_env("JOYAI_SRC_DIR", "/remote-home/Zhangkaile/dev/JoyAI-Image")
+# GPU card for the edit model, e.g. "cuda:2". Leave None to auto-detect the
+# freest card at runtime. This is the only local model — the VLM is remote —
+# so no co-residence constraint applies. Env: QWEN_EDIT_DEVICE
+QWEN_EDIT_DEVICE = os.environ.get("QWEN_EDIT_DEVICE")
 
-# GPU card for JoyAI, e.g. "cuda:2". Leave None to auto-detect the freest
-# card at runtime. This is the only local model — the VLM is remote — so no
-# co-residence constraint applies. Env: JOYAI_DEVICE
-JOYAI_DEVICE = os.environ.get("JOYAI_DEVICE")
+QWEN_EDIT_BASE_SEED = 42
+QWEN_EDIT_STEPS = 40
 
-JOYAI_BASE_SEED = 42
-JOYAI_STEPS = 30
-JOYAI_GUIDANCE_SCALE = 5.0
+# NOTE: the diffusion model may emit an output size different from the input;
+# call_qwen_edit.QwenEdit always resizes the result back to the exact input
+# size before returning it.
 
 # ---------------------------------------------------------------------------
 # Bounding box normalization

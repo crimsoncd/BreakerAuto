@@ -3,7 +3,7 @@ Pipeline tools — the 6 core functions that all stages use.
 
 Tools:
   vlm(system_prompt, image(s), user_text) -> str
-  joyai(image, prompt) -> image
+  qwen_edit(image, prompt) -> image
   crop(image, bbox, pad=0.1) -> image
   matte_to_alpha(image_on_plain_bg) -> RGBA
   resize(image, size) -> image
@@ -30,47 +30,48 @@ import numpy as np
 from PIL import Image
 
 from call_bailian_vlm import BailianVLM_inference
-from call_JoyAI import JoyEdit
+from call_qwen_edit import QwenEdit
 from config import (
-    BBOX_NORM, JOYAI_BASE_SEED,
-    JOYAI_DEVICE as _JOYAI_DEVICE,
+    BBOX_NORM, QWEN_EDIT_BASE_SEED,
+    QWEN_EDIT_DEVICE as _QWEN_EDIT_DEVICE,
 )
 
 import rembg
 
-# JoyAI's device. Seeded from config/env; resolved at runtime by
-# resolve_joyai_device() when None. The VLM is remote (Bailian API), so this
-# is the only local model and a single GPU suffices.
-JOYAI_DEVICE = _JOYAI_DEVICE
+# Edit model's device. Seeded from config/env; resolved at runtime by
+# resolve_edit_device() when None. The VLM is remote (Bailian API), so the
+# Qwen-Image-2.1 edit model is the only local model and a single GPU suffices.
+EDIT_DEVICE = _QWEN_EDIT_DEVICE
 
 
-def resolve_joyai_device(force: str = None) -> str:
-    """Resolve the GPU card for JoyAI — the only local model in the pipeline.
+def resolve_edit_device(force: str = None) -> str:
+    """Resolve the GPU card for the Qwen-Image-2.1 edit model — the only local
+    model in the pipeline.
 
     The VLM runs remotely via the Bailian API, so no second card is needed
     and there is no co-residence constraint anymore.
 
-    Priority: explicit `force` argument > config.JOYAI_DEVICE (env
-    JOYAI_DEVICE) > auto-detect the card with the most free memory.
+    Priority: explicit `force` argument > config.QWEN_EDIT_DEVICE (env
+    QWEN_EDIT_DEVICE) > auto-detect the card with the most free memory.
     """
-    global JOYAI_DEVICE
+    global EDIT_DEVICE
 
-    if JOYAI_DEVICE is not None:
-        print(f"[GPU] JoyAI device (pre-set): {JOYAI_DEVICE}")
-        return JOYAI_DEVICE
+    if EDIT_DEVICE is not None:
+        print(f"[GPU] Edit-model device (pre-set): {EDIT_DEVICE}")
+        return EDIT_DEVICE
 
-    force = force or _JOYAI_DEVICE
+    force = force or _QWEN_EDIT_DEVICE
     if force:
-        JOYAI_DEVICE = force
-        print(f"[GPU] JoyAI device (manual override): {JOYAI_DEVICE}")
-        return JOYAI_DEVICE
+        EDIT_DEVICE = force
+        print(f"[GPU] Edit-model device (manual override): {EDIT_DEVICE}")
+        return EDIT_DEVICE
 
     try:
         import torch
         if not torch.cuda.is_available():
-            print("[GPU] No CUDA available — JoyAI falling back to CPU")
-            JOYAI_DEVICE = "cpu"
-            return JOYAI_DEVICE
+            print("[GPU] No CUDA available — edit model falling back to CPU")
+            EDIT_DEVICE = "cpu"
+            return EDIT_DEVICE
 
         # Query nvidia-smi for memory; pick the card with the most free memory.
         result = subprocess.run(
@@ -101,14 +102,14 @@ def resolve_joyai_device(force: str = None) -> str:
 
         # Most free memory first, then lowest utilization.
         gpu_stats.sort(key=lambda x: (-x[2], x[1]))
-        JOYAI_DEVICE = f"cuda:{gpu_stats[0][0]}"
-        print(f"[GPU] Auto-detected JoyAI device: {JOYAI_DEVICE}")
+        EDIT_DEVICE = f"cuda:{gpu_stats[0][0]}"
+        print(f"[GPU] Auto-detected edit-model device: {EDIT_DEVICE}")
 
     except Exception as e:
-        JOYAI_DEVICE = "cuda:0"
-        print(f"[GPU] Error occurred ({e}) — JoyAI fallback device: {JOYAI_DEVICE}")
+        EDIT_DEVICE = "cuda:0"
+        print(f"[GPU] Error occurred ({e}) — edit-model fallback device: {EDIT_DEVICE}")
 
-    return JOYAI_DEVICE
+    return EDIT_DEVICE
 
 
 
@@ -237,23 +238,28 @@ def vlm(system_prompt: str, image_input, user_text: str,
 
 
 # ---------------------------------------------------------------------------
-# Tool 2: JoyAI (the only edit entrypoint)
+# Tool 2: Qwen-Image-2.1 edit (the only edit entrypoint)
 # ---------------------------------------------------------------------------
-def joyai(image: ImageLike, prompt: str, output_path: Optional[str | Path] = None,
-          seed: int = JOYAI_BASE_SEED, device: Optional[str] = None,
-          logger=None) -> Optional[Image.Image]:
-    """Run JoyAI edit. Returns PIL Image or None on failure.
+def qwen_edit(image: ImageLike, prompt: str, output_path: Optional[str | Path] = None,
+              seed: int = QWEN_EDIT_BASE_SEED, device: Optional[str] = None,
+              logger=None) -> Optional[Image.Image]:
+    """Run the Qwen-Image-2.1 edit. Returns PIL Image or None on failure.
 
-    Uses the auto-detected JOYAI_DEVICE by default; pass device= to override.
+    The pipeline is loaded lazily on the first call and kept resident for the
+    rest of the task. The model may emit a different output size than the
+    input; the result is always resized back to the exact input size (done
+    inside QwenEdit).
+
+    Uses the auto-detected EDIT_DEVICE by default; pass device= to override.
     """
     if device is None:
-        device = JOYAI_DEVICE  # use globally-resolved device
+        device = EDIT_DEVICE  # use globally-resolved device
     if logger and prompt:
-        logger.log_text(prompt, label="joyai_prompt")
-    print(f"[JoyAI] editing started (device={device}, seed={seed}): {prompt[:80]}")
+        logger.log_text(prompt, label="edit_prompt")
+    print(f"[QwenEdit] editing started (device={device}, seed={seed}): {prompt[:80]}")
     t0 = time.time()
     try:
-        result = JoyEdit(
+        result = QwenEdit(
             image=image,
             prompt=prompt,
             output_path=str(output_path) if output_path else None,
@@ -261,13 +267,13 @@ def joyai(image: ImageLike, prompt: str, output_path: Optional[str | Path] = Non
             seed=seed,
         )
         if result.ok and result.image is not None:
-            print(f"[JoyAI] editing done in {time.time() - t0:.1f}s")
+            print(f"[QwenEdit] editing done in {time.time() - t0:.1f}s")
             return result.image
         else:
-            print(f"[JoyAI] editing FAILED after {time.time() - t0:.1f}s: {result.error}")
+            print(f"[QwenEdit] editing FAILED after {time.time() - t0:.1f}s: {result.error}")
             return None
     except Exception as e:
-        print(f"[JoyAI] editing EXCEPTION after {time.time() - t0:.1f}s: {e}")
+        print(f"[QwenEdit] editing EXCEPTION after {time.time() - t0:.1f}s: {e}")
         traceback.print_exc()
         return None
 
@@ -483,9 +489,9 @@ def _fake_vlm(system_prompt: str, image_input, user_text: str,
     return "{}"
 
 
-def _fake_joyai(image: ImageLike, prompt: str, output_path=None, seed=42,
-                device="cuda:1", logger=None) -> Optional[Image.Image]:
-    """Stub JoyAI that returns the input image unchanged."""
+def _fake_qwen_edit(image: ImageLike, prompt: str, output_path=None, seed=42,
+                    device="cuda:1", logger=None) -> Optional[Image.Image]:
+    """Stub edit model that returns the input image unchanged."""
     if isinstance(image, (str, Path)):
         img = Image.open(image)
     else:

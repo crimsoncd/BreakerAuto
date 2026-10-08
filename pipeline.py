@@ -31,7 +31,7 @@ from scene_graph import (
 from config import (
     ELEMENT_RETRIES, BACKGROUND_RETRIES, GLOBAL_ATTEMPTS,
     MAX_ENUM_REOPENINGS, MAX_ELEMENTS, BBOX_NORM,
-    JOYAI_BASE_SEED,
+    QWEN_EDIT_BASE_SEED,
     VLM_MAX_TOKENS_PLANNER, VLM_MAX_TOKENS_CHECKER, VLM_MAX_TOKENS_PROMPT_WRITER,
     VLM_MAX_TOKENS_DESCRIBER,
     DEFAULT_OUTPUT_DIR,
@@ -49,7 +49,7 @@ from prompts import (
 from logger import RunLogger
 import pipeline_tools
 from pipeline_tools import (
-    vlm, joyai, crop, matte_to_alpha, resize, composite,
+    vlm, qwen_edit, crop, matte_to_alpha, resize, composite,
     vlm_json, parse_json_relaxed,
     resize_layer_to_bbox, denorm_bbox_pixels,
     _denorm_bbox,
@@ -295,19 +295,19 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
         element.isolation_prompt = isolation_prompt
         print(f"  [el {element.id}] Step 3/6 isolation prompt: {isolation_prompt[:80]}...")
 
-        # Step 4: Generate with JoyAI
-        seed = JOYAI_BASE_SEED + attempt
-        gen_out_path = logger.run_dir / f"joyai_{element.id}_attempt{attempt}.png"
-        print(f"  [el {element.id}] Step 4/6 JoyAI generation (attempt {attempt}/{ELEMENT_RETRIES}, seed={seed})...")
+        # Step 4: Generate with the Qwen-Image-2.1 edit model
+        seed = QWEN_EDIT_BASE_SEED + attempt
+        gen_out_path = logger.run_dir / f"edit_{element.id}_attempt{attempt}.png"
+        print(f"  [el {element.id}] Step 4/6 Qwen edit generation (attempt {attempt}/{ELEMENT_RETRIES}, seed={seed})...")
         if pipeline_tools.FAKE_MODE:
-            generated = pipeline_tools._fake_joyai(crop_img, isolation_prompt, gen_out_path, seed)
+            generated = pipeline_tools._fake_qwen_edit(crop_img, isolation_prompt, gen_out_path, seed)
         else:
-            generated = joyai(crop_img, isolation_prompt, gen_out_path, seed)
+            generated = qwen_edit(crop_img, isolation_prompt, gen_out_path, seed)
             if generated:
                 logger.save_image(generated, f"gen_{element.id}_att{attempt}")
 
         if generated is None:
-            print(f"  [el {element.id}] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — JoyAI generation failed")
+            print(f"  [el {element.id}] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — edit generation failed")
             continue
 
         # Step 5: Matte to alpha
@@ -364,7 +364,7 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
     else:
         element.status = ElementStatus.FAILED
         element.defects = ["generation_failed"]
-        print(f"  >>> Element {element.id} FAILED — all JoyAI attempts exhausted")
+        print(f"  >>> Element {element.id} FAILED — all edit attempts exhausted")
 
     logger.save_scene_graph(graph, f"stage2_after_{element.id}")
 
@@ -467,12 +467,12 @@ def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
         print(f"  Background prompt: {bg_prompt[:120]}...")
 
         # Generate
-        seed = JOYAI_BASE_SEED + attempt * 100
+        seed = QWEN_EDIT_BASE_SEED + attempt * 100
         bg_out_path = logger.run_dir / f"background_attempt{attempt}.png"
         if pipeline_tools.FAKE_MODE:
-            generated = pipeline_tools._fake_joyai(original_img, bg_prompt, bg_out_path, seed)
+            generated = pipeline_tools._fake_qwen_edit(original_img, bg_prompt, bg_out_path, seed)
         else:
-            generated = joyai(original_img, bg_prompt, bg_out_path, seed)
+            generated = qwen_edit(original_img, bg_prompt, bg_out_path, seed)
             if generated:
                 logger.save_image(generated, f"bg_gen_att{attempt}")
 
@@ -917,7 +917,7 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
     Args:
         image_path: path to the illustration image.
         output_dir: where to write the run folder.
-        use_fake: if True, use stubs for VLM and JoyAI (testing only).
+        use_fake: if True, use stubs for VLM and the edit model (testing only).
         use_verify: if True, run the VLM verification loop on each extracted
             element cutout (slower, higher quality).
         use_global: if True, run the final global reconstruction verification
@@ -933,10 +933,10 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
     t_run = time.time()
     print(f"[PIPELINE] Run started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Resolve JoyAI's GPU before any model loading (only in non-fake mode).
-    # The VLM runs remotely via API, so a single local GPU suffices.
+    # Resolve the edit model's GPU before any model loading (only in non-fake
+    # mode). The VLM runs remotely via API, so a single local GPU suffices.
     if not use_fake:
-        pipeline_tools.resolve_joyai_device()
+        pipeline_tools.resolve_edit_device()
 
     if use_verify:
         print("Element verification ENABLED — VLM checks each extracted cutout.")

@@ -33,13 +33,13 @@ rewrite = ["openai"]
 decompose = "main:main"
 
 # This repo uses a flat, top-level-module layout (no package directory), so
-# the modules are listed explicitly. JoyAI loads from the JoyAI-Image source
-# repo (infer_runtime / modules via config.JOYAI_SRC_DIR), which is put on
-# sys.path by call_JoyAI.py — no pip-installable JoyAI package is needed.
+# the modules are listed explicitly. The Qwen-Image-2.1 edit model loads via
+# diffusers (QwenImage21Pipeline from config.QWEN_EDIT_CKPT_ROOT) — no
+# separate source repo is needed.
 [tool.setuptools]
 py-modules = [
-    "call_JoyAI",
-    "call_Qwen3VL",
+    "call_bailian_vlm",
+    "call_qwen_edit",
     "cleaner",
     "collage_svg",
     "config",
