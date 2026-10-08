@@ -33,7 +33,7 @@ Return STRICT JSON with the following structure:
 
 ### GRANULARITY & LOGIC RULES
 - **Background First**: Always identify the background first and assign it `order: 0`.
-- **Object Granularity**: List whole objects (e.g., "boat", "house", "cloud"). Do NOT list parts (e.g., "window", "wheel") unless they are detached.
+- **Object Granularity**: List whole objects (e.g., "boat", "house", "cloud"). Do NOT list parts (e.g., "window", "wheel", "face", "hand") unless they are detached.
 - **Grouping**: Group contiguous masses of the same kind as ONE element (e.g., all grass = one "grass_patch").
 - **Ordering Logic**: Determine the `order` based on occlusion. If Object A covers Object B, Object B must have a lower `order` than Object A.
 - **Coordinates**: Estimate the tight bounding box around the object's VISIBLE extent and normalize it to 0-1000.
