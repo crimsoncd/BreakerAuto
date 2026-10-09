@@ -34,6 +34,7 @@ from call_qwen_edit import QwenEdit
 from config import (
     BBOX_NORM, QWEN_EDIT_BASE_SEED,
     QWEN_EDIT_DEVICE as _QWEN_EDIT_DEVICE,
+    BG_COLOR_TOL, BG_FLAT_MIN_FRAC, BG_FILL_DILATE_IT, BG_FILL_PAD,
 )
 
 import rembg
@@ -429,6 +430,117 @@ def composite(background: ImageLike,
 
 
 # ---------------------------------------------------------------------------
+# Tool 7: Classical background analysis & fill (Stage 3, default route)
+# ---------------------------------------------------------------------------
+def _bbox_union_mask(bboxes: list[list[int]], img_w: int, img_h: int,
+                     pad: float = BG_FILL_PAD) -> np.ndarray:
+    """Binary uint8 mask (255 inside) of the padded union of element bboxes.
+
+    bboxes are [xmin, ymin, xmax, ymax] normalized to 0-1000.
+    """
+    m = np.zeros((img_h, img_w), np.uint8)
+    for b in bboxes:
+        x0, y0 = int(b[0] / BBOX_NORM * img_w), int(b[1] / BBOX_NORM * img_h)
+        x1, y1 = int(b[2] / BBOX_NORM * img_w), int(b[3] / BBOX_NORM * img_h)
+        bw, bh = max(1, x1 - x0), max(1, y1 - y0)
+        x0, y0 = max(0, x0 - int(bw * pad)), max(0, y0 - int(bh * pad))
+        x1, y1 = min(img_w, x1 + int(bw * pad)), min(img_h, y1 + int(bh * pad))
+        m[y0:y1, x0:x1] = 255
+    return m
+
+
+def dilate_mask(mask: np.ndarray, iterations: int = BG_FILL_DILATE_IT) -> np.ndarray:
+    """Binary dilation of a 0/255 uint8 mask with a 3x3 square element.
+
+    Pure numpy (no cv2 dependency); good enough for small kernels.
+    """
+    m = (mask > 0).astype(np.uint8)
+    for _ in range(int(iterations)):
+        p = np.pad(m, 1, mode="constant")
+        m = np.maximum.reduce([p[:-2, :-2], p[:-2, 1:-1], p[:-2, 2:],
+                               p[1:-1, :-2], p[1:-1, 1:-1], p[1:-1, 2:],
+                               p[2:, :-2], p[2:, 1:-1], p[2:, 2:]]).astype(np.uint8)
+    return m * 255
+
+
+def estimate_background(image: ImageLike, bboxes: list[list[int]],
+                        pad: float = BG_FILL_PAD, tol: int = BG_COLOR_TOL,
+                        flat_min_frac: float = BG_FLAT_MIN_FRAC) -> dict:
+    """Classically analyze the background of an illustration.
+
+    Estimates the background color as the median of all pixels OUTSIDE the
+    padded union of the element bboxes, and measures how flat the background is.
+
+    Returns dict:
+        color        [r, g, b] or None (not measurable / nothing unmasked)
+        flat_frac    fraction of unmasked pixels within `tol` of the color
+        unmasked_frac fraction of the image left outside the padded boxes
+        is_flat      True if flat_frac >= flat_min_frac
+    """
+    img = Image.open(image) if isinstance(image, (str, Path)) else image
+    img = img.convert("RGB")
+    w, h = img.size
+    arr = np.array(img)
+
+    if bboxes:
+        bmask = _bbox_union_mask(bboxes, w, h, pad)
+        keep = bmask == 0
+    else:
+        keep = np.ones((h, w), bool)
+
+    unmasked_frac = float(keep.mean())
+    if unmasked_frac < 0.01:
+        # No reliable background region to sample — cannot analyze.
+        return {"color": None, "flat_frac": 0.0, "unmasked_frac": unmasked_frac,
+                "is_flat": False}
+
+    px = arr[keep].reshape(-1, 3).astype(np.int32)
+    color = np.median(px, axis=0)
+    dev = np.abs(px - color).max(axis=1)
+    flat_frac = float((dev < tol).mean())
+
+    return {"color": [int(c) for c in color],
+            "flat_frac": round(flat_frac, 4),
+            "unmasked_frac": round(unmasked_frac, 4),
+            "is_flat": bool(flat_frac >= flat_min_frac)}
+
+
+def classic_background_fill(image: ImageLike, bboxes: list[list[int]],
+                            bg_color: list[int],
+                            pad: float = BG_FILL_PAD, tol: int = BG_COLOR_TOL,
+                            dilate_it: int = BG_FILL_DILATE_IT
+                            ) -> tuple[Image.Image, np.ndarray]:
+    """Classical background extraction: replace foreground with the bg color.
+
+    Fill mask = dilated color-outlier mask  ∪  padded bbox union:
+      - the color-outlier part catches object pixels anywhere in the image
+        (including fragments outside their planned bboxes);
+      - the dilation removes anti-aliasing ghost fringes;
+      - the bbox union catches objects whose color is close to the background.
+
+    Every fill-mask pixel is set to `bg_color`; all other pixels are passed
+    through unchanged — the result is pixel-exact outside the filled regions.
+
+    Returns (filled RGB image, fill mask ndarray 0/255).
+    """
+    img = Image.open(image) if isinstance(image, (str, Path)) else image
+    img = img.convert("RGB")
+    w, h = img.size
+    arr = np.array(img)
+
+    color = np.array(bg_color, dtype=np.int32)
+    dev = np.abs(arr.astype(np.int32) - color).max(axis=2)
+    outlier = ((dev > tol) * 255).astype(np.uint8)
+
+    fill_mask = np.maximum(dilate_mask(outlier, dilate_it),
+                           _bbox_union_mask(bboxes, w, h, pad))
+
+    filled = arr.copy()
+    filled[fill_mask > 0] = color.astype(np.uint8)
+    return Image.fromarray(filled), fill_mask
+
+
+# ---------------------------------------------------------------------------
 # Fakes/stubs for testing (Step 1 of build order)
 # ---------------------------------------------------------------------------
 FAKE_MODE = False
@@ -476,6 +588,9 @@ def _fake_vlm(system_prompt: str, image_input, user_text: str,
         })
     if "occupancy" in system_prompt.lower() or "intrude" in system_prompt.lower():
         return json.dumps({"target_present": True, "contaminants": []})
+    if "measured background color" in system_prompt.lower():
+        # background prompt writer (anchored)
+        return json.dumps({"prompt": "remove all foreground objects and fill with the flat background color"})
     if "foreground objects to remove" in system_prompt:
         return json.dumps({"prompt": "remove all foreground objects, fill background"})
     if "editing instruction" in system_prompt.lower():

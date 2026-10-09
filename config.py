@@ -101,6 +101,31 @@ QWEN_EDIT_STEPS = 40
 # size before returning it.
 
 # ---------------------------------------------------------------------------
+# Background extraction configuration
+# ---------------------------------------------------------------------------
+# Stage-3 method. Env: BACKGROUND_METHOD
+#   "classic" (default) — classical color fill: no model, instant, pixel-exact.
+#       Requires a verifiably flat background; otherwise falls back to "model".
+#   "model" — VLM-written, color-anchored prompt + Qwen edit generation
+#       (with the verify-retry loop).
+BACKGROUND_METHOD = _from_env("BACKGROUND_METHOD", "classic")
+
+# Max channel delta for a pixel to count as "background colored". Tuned on the
+# flat-style SynthImages dataset (see exp_bg/RESULTS.md).
+BG_COLOR_TOL = 24
+
+# Minimum fraction of unmasked pixels that must match the bg color for the
+# background to count as "flat".
+BG_FLAT_MIN_FRAC = 0.97
+
+# Dilation iterations (pixels) applied to the color-outlier mask before
+# filling — removes anti-aliasing ghost fringes around objects.
+BG_FILL_DILATE_IT = 5
+
+# Padding fraction for the element-bbox union used in the fill mask.
+BG_FILL_PAD = 0.05
+
+# ---------------------------------------------------------------------------
 # Bounding box normalization
 # ---------------------------------------------------------------------------
 BBOX_NORM = 1000  # bbox coords are 0-1000

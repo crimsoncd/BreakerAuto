@@ -14,3 +14,11 @@ reconstruction/
 
 cleaned/
 runs_apitest/
+
+# local experiment workspace + dev log (kept locally, not for the repo)
+exp_bg/
+WORKLOG.md
+QwenImage2.1-README.md
+
+# chat history archive
+CHATLOG_*.md

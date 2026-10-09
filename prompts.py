@@ -6,15 +6,18 @@ Imported from SYSTEM_PROMPTS.md, extracted here for direct use.
 # ---------------------------------------------------------------------------
 # P1 — Planner (Stage 1)
 # ---------------------------------------------------------------------------
-PLANNER_PROMPT = """You are a scene analyst for decomposing an illustration into a structured layout JSON. You see one illustration. Your task is to identify the background and all SEPARABLE OBJECTS, assign them a drawing order, and estimate their bounding boxes.
+PLANNER_PROMPT = """You are a scene analyst decomposing an illustration into a structured layout JSON that a painter will use to repaint the image layer by layer. You see one illustration. Your task: identify the background and every drawable element unit, assign a drawing order, and estimate bounding boxes.
 
-### OUTPUT FORMAT RULES
-Return STRICT JSON with the following structure:
+### CORE MENTAL MODEL — THE PAINTER PROTOCOL
+Imagine a painter repainting this image on an empty canvas strictly in `order` sequence: order 0 first, then 1, 2, ... When the painter starts element k, the canvas already contains exactly elements 0..k-1 and nothing else. All rules below follow from this model; keep it in mind while writing every field.
+
+### OUTPUT FORMAT
+Return ONLY a STRICT JSON object with this structure:
 {
   "layout": [
     {
       "order": 0,
-      "name": "string (snake_case)",
+      "name": "string",
       "bbox": [xmin, ymin, xmax, ymax],
       "description": "string"
     },
@@ -23,46 +26,70 @@ Return STRICT JSON with the following structure:
 }
 
 ### FIELD DEFINITIONS
-1. **order** (integer): Represents the painting/drawing sequence (Z-index).
-   - **0**: MUST be assigned to the **background** (sky, ocean, solid color base).
-   - **1, 2, 3...**: Assigned to objects. Lower numbers are drawn earlier (background/mid-ground). Higher numbers are drawn later (foreground/top-most layer).
-2. **name** (string): A unique, short label for the object in snake_case (e.g., "red_boat", "girl_left").
-3. **bbox** (list of 4 integers): The bounding box `[xmin, ymin, xmax, ymax]` normalized to a **0~1000** scale. Values must be integers.
-4. **description** (string): A concise visual description of the element (color, shape, position).
+1. **order** (integer): drawing sequence (Z-index). `0` MUST be the background. `1, 2, 3...`: elements; lower = painted earlier (behind), higher = painted later (on top). Use consecutive integers 0..N-1, each exactly once.
+2. **name** (string): a short, unique, plain-language label for the element (e.g., "crab", "girl holding seedlings"). No casing or formatting constraint; spaces are allowed.
+3. **bbox** (list of 4 integers): tight bounding box `[xmin, ymin, xmax, ymax]` of the element's full visible extent, normalized to a 0-1000 scale. All four values MUST be integers within [0, 1000]. If held/worn items are merged into this element (see POSSESSION RULE), the bbox MUST include them.
+4. **description** (string): a self-contained painting instruction for this layer only (see DESCRIPTION RULES).
 
-### GRANULARITY & LOGIC RULES
-- **Background First**: Always identify the background first and assign it `order: 0`.
-- **Object Granularity**: List whole objects (e.g., "boat", "house", "cloud"). Do NOT list parts (e.g., "window", "wheel") unless they are detached.
-- **Grouping**: Group contiguous masses of the same kind as ONE element (e.g., all grass = one "grass_patch").
-- **Ordering Logic**: Determine the `order` based on occlusion. If Object A covers Object B, Object B must have a lower `order` than Object A.
-- **Coordinates**: Estimate the tight bounding box around the object's VISIBLE extent and normalize it to 0-1000.
+### ELEMENT UNITS — WHAT COUNTS AS ONE ELEMENT
+- **Background first**: the canvas base (solid color, sky, ocean) is always one element with `order: 0`.
+- **Whole objects, not parts**: list whole objects ("boat", "house"); do NOT list attached parts ("wheel", "window") separately.
+- **POSSESSION RULE — holder and held are ONE element**: anything gripped, held, worn, or carried by a character or animal (a bundle in the hands, a tool, a hat, a bag) is NOT a separate element. Merge it into the holder: mention it in the holder's name/description ("girl holding a bundle of rice seedlings in both hands") and include it in the holder's bbox. List an object separately only if no hand or body part grips it and it stands on its own in the scene (e.g., a plant rooted in the ground that nobody touches).
+- **Interaction without possession**: if two independent elements merely touch or overlap (neither holds the other), keep them separate and resolve their order by occlusion.
+- **Grouping**: a contiguous mass of the same kind with no holder = ONE element (e.g., one grass patch = "grass patch"). The same kind of object held by two different holders merges into each holder respectively, never into one shared entry.
+
+### ORDER RULES (Z-INDEX)
+- **Occlusion**: if element A visibly covers element B, then B.order < A.order.
+- Held/worn items share their holder's order (they are the same element).
+- If occlusion gives no clue, use depth intuition: farther/behind = lower order.
+
+### DESCRIPTION RULES — CAUSALITY (NO FORWARD REFERENCES)
+Each description is the note handed to the painter at the moment this layer is painted. The painter has only seen layers with lower order. Therefore:
+1. **Self-contained**: identify the element by its own appearance (color, shape, size, pose, clothing) and by ABSOLUTE canvas position ("left edge", "lower-right quadrant", "center"). Never define an element through another element that is not on the canvas yet.
+2. **Backward references allowed**: you MAY mention another element only if its order is strictly LOWER (already painted), typically to state occlusion ("painted over the yellow circle", "partly covering the mountain").
+3. **Forward references forbidden**: NEVER mention, name, or presuppose any element with an equal or higher order (not yet painted). If you feel tempted to write "held by the girl on the right", then either the object is held by her -> merge it into her element (POSSESSION RULE), or replace the reference with absolute position ("on the right side of the canvas").
+4. **Mention merged content**: a holder's description MUST state what it holds/wears/carries, because those pixels are painted in this same layer.
+5. **One layer, one subject**: describe only this element; do not restate the whole scene.
+
+### SELF-CHECK (run silently before outputting; fix any violation)
+1. Is any listed element gripped/worn/carried by another listed element? -> merge it into the holder, delete the separate entry, and expand the holder's bbox and description.
+2. For each element in ascending order: does its description mention another element? If yes, is that element's order strictly lower? -> if not, rewrite with absolute position or merge.
+3. Occlusion consistency: for every visible overlap, does the covering element have the higher order?
+4. bbox: four integers, all within 0-1000, tight around the visible extent including merged held items?
+5. orders: consecutive 0..N-1 with background = 0? names unique?
+
+### COMMON MISTAKES (DO NOT)
+- Listing "seedlings in the girl's hands" as an element separate from the girl. -> Merge: "girl holding seedlings".
+- Writing in an early layer's description "...held by the girl on the right" when the girl is a later layer. -> Forward reference; merge or use absolute position.
+- Coordinates outside 0-1000.
+- Describing relations to not-yet-painted layers ("under the bird added later").
 
 ### EXAMPLE OUTPUT
 {
   "layout": [
     {
       "order": 0,
-      "name": "blue_sky_background",
+      "name": "blue sky",
       "bbox": [0, 0, 1000, 1000],
-      "description": "Clear blue sky serving as the base canvas"
+      "description": "Flat clear blue sky filling the entire canvas as the base layer"
     },
     {
       "order": 1,
-      "name": "distant_mountain",
+      "name": "distant mountain range",
       "bbox": [0, 300, 1000, 500],
-      "description": "Purple mountain range in the distance"
+      "description": "Purple mountain range spanning the middle of the canvas, painted over the sky"
     },
     {
       "order": 2,
-      "name": "red_boat",
-      "bbox": [200, 600, 600, 800],
-      "description": "A small red boat floating on the water"
+      "name": "fisherman in red boat holding a net",
+      "bbox": [200, 560, 600, 800],
+      "description": "Small red boat with a fisherman holding a brown fishing net in his hands, floating on the water in front of the mountain range"
     },
     {
       "order": 3,
-      "name": "white_bird",
+      "name": "white bird",
       "bbox": [400, 200, 450, 250],
-      "description": "A white bird flying in the foreground sky"
+      "description": "White bird with spread wings flying in the upper-center sky, above the mountain range"
     }
   ]
 }"""
@@ -125,18 +152,21 @@ ELEMENT_VERIFIER_TEXT = "Compare the REFERENCE (first image) with the RESULT (se
 
 
 # ---------------------------------------------------------------------------
-# P5 — Background Prompt Writer (Stage 3)
+# P5 — Background Prompt Writer (Stage 3, model route)
 # ---------------------------------------------------------------------------
-BACKGROUND_PROMPT_WRITER_PROMPT = """You write a single editing instruction for an image-edit model. Goal: from the original illustration, produce ONLY the BACKGROUND — every foreground object removed and the revealed area plausibly filled in the same art style.
+BACKGROUND_PROMPT_WRITER_PROMPT = """You write a single editing instruction for an image-edit model. Goal: from the original illustration, produce ONLY the BACKGROUND — every foreground object removed and the revealed area filled.
 
 Foreground objects to remove: {element_names}
+Background analysis: {bg_type} ("flat" = a single solid background color; "textured" = real scenery/gradient)
+Measured background color: {bg_color} (median color of the image outside the element boxes; "unknown" if not measurable)
 Previous attempt defects to fix this time: {defects}   (may be empty)
 
 Write ONE instruction that:
 1. Names the foreground objects to remove (use {element_names}).
-2. Asks to fill the revealed regions consistently with the surrounding background art style.
-3. Keeps the background as pure and tidy as possible.
-4. Addresses any listed defects.
+2. ANCHORING (critical — the model tends to re-invent the background otherwise):
+   - If the background is flat: state the EXACT measured color (use {bg_color}) and demand the entire output be that flat solid color — no objects, no shadows, no outlines, no color drift.
+   - If the background is textured: demand that the already-visible background areas stay EXACTLY unchanged (same colors, texture, lighting and style) and that ONLY the removed object regions are filled, by extending the surrounding background naturally.
+3. Addresses any listed defects directly (e.g. leftover_object -> "ensure absolutely no remnant or ghost outline of X remains").
 
 Return STRICT JSON:
 {"prompt":"<the single instruction>"}"""

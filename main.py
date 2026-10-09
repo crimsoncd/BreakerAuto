@@ -24,12 +24,13 @@ import sys
 import time
 from pathlib import Path
 
-from config import DEFAULT_OUTPUT_DIR
+from config import DEFAULT_OUTPUT_DIR, BACKGROUND_METHOD
 from pipeline import run_pipeline
 
 
 def process_single(image_path: Path, output_dir: str, use_fake: bool,
-                   use_verify: bool, use_global: bool) -> dict:
+                   use_verify: bool, use_global: bool,
+                   bg_method: str = None) -> dict:
     """Process one image through the decomposition pipeline."""
     print("\n" + "#" * 70)
     print(f"# IMAGE: {image_path.name}")
@@ -42,6 +43,7 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
         use_fake=use_fake,
         use_verify=use_verify,
         use_global=use_global,
+        bg_method=bg_method,
     )
     elapsed = time.time() - t0
 
@@ -58,7 +60,8 @@ def process_single(image_path: Path, output_dir: str, use_fake: bool,
 
 
 def process_batch(image_dir: Path, output_dir: str, use_fake: bool,
-                  use_verify: bool, use_global: bool) -> dict:
+                  use_verify: bool, use_global: bool,
+                  bg_method: str = None) -> dict:
     """Process all images in a directory."""
     image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
     image_files = sorted([
@@ -79,7 +82,7 @@ def process_batch(image_dir: Path, output_dir: str, use_fake: bool,
     for i, img_path in enumerate(image_files):
         print(f"\n[{i + 1}/{len(image_files)}]")
         try:
-            result = process_single(img_path, output_dir, use_fake, use_verify, use_global)
+            result = process_single(img_path, output_dir, use_fake, use_verify, use_global, bg_method)
             results.append({"image": img_path.name, "status": "ok", "result": result})
         except Exception as e:
             print(f"  ERROR processing {img_path.name}: {e}")
@@ -126,6 +129,14 @@ def main():
         "--use_global", action="store_true",
         help="Enable the final global reconstruction verification loop (default: skipped for speed)."
     )
+    parser.add_argument(
+        "--bg_method", type=str, default=BACKGROUND_METHOD,
+        choices=["classic", "model"],
+        help=("Stage-3 background extraction method: 'classic' (default) = "
+              "classical color fill when the background is verifiably flat, "
+              "with model fallback; 'model' = VLM-written color-anchored "
+              "prompt + Qwen edit generation.")
+    )
     args = parser.parse_args()
 
     if not args.image and not args.dir:
@@ -138,7 +149,8 @@ def main():
             print(f"ERROR: Image not found: {image_path}")
             sys.exit(1)
         process_single(image_path, args.output, use_fake=args.fake,
-                       use_verify=args.use_verify, use_global=args.use_global)
+                       use_verify=args.use_verify, use_global=args.use_global,
+                       bg_method=args.bg_method)
         print("\nDone.")
         return
 
@@ -149,7 +161,8 @@ def main():
             print(f"ERROR: Directory not found: {image_dir}")
             sys.exit(1)
         process_batch(image_dir, args.output, use_fake=args.fake,
-                      use_verify=args.use_verify, use_global=args.use_global)
+                      use_verify=args.use_verify, use_global=args.use_global,
+                      bg_method=args.bg_method)
         print("\nDone.")
         return
 

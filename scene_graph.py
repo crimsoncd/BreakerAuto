@@ -86,6 +86,7 @@ class Background:
     defects: list[str] = field(default_factory=list)
     name: Optional[str] = None                 # short noun phrase for the background (dataset metadata)
     description: Optional[str] = None          # one-sentence background description (dataset metadata)
+    method: Optional[str] = None               # how the bg was produced: "classic_fill" / "model"
 
     def to_dict(self) -> dict:
         return {
@@ -96,6 +97,7 @@ class Background:
             "defects": self.defects,
             "name": self.name,
             "description": self.description,
+            "method": self.method,
         }
 
     @classmethod
@@ -108,6 +110,7 @@ class Background:
             defects=d.get("defects", []),
             name=d.get("name"),
             description=d.get("description"),
+            method=d.get("method"),
         )
 
 

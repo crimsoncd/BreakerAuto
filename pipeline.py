@@ -31,7 +31,7 @@ from scene_graph import (
 from config import (
     ELEMENT_RETRIES, BACKGROUND_RETRIES, GLOBAL_ATTEMPTS,
     MAX_ENUM_REOPENINGS, MAX_ELEMENTS, BBOX_NORM,
-    QWEN_EDIT_BASE_SEED,
+    QWEN_EDIT_BASE_SEED, BACKGROUND_METHOD,
     VLM_MAX_TOKENS_PLANNER, VLM_MAX_TOKENS_CHECKER, VLM_MAX_TOKENS_PROMPT_WRITER,
     VLM_MAX_TOKENS_DESCRIBER,
     DEFAULT_OUTPUT_DIR,
@@ -386,12 +386,28 @@ def run_stage2(graph: SceneGraph, logger: RunLogger, use_verify: bool) -> None:
 # Stage 3 — Background extraction
 # ---------------------------------------------------------------------------
 def _write_background_prompt(graph: SceneGraph, defects: list[str],
-                             logger: RunLogger) -> str:
-    """Stage 3: Write background removal prompt."""
+                             logger: RunLogger, bg_info: dict | None = None) -> str:
+    """Stage 3 (model route): Write a color-ANCHORED background prompt.
+
+    The classical background analysis (bg_info) is injected so the writer can
+    anchor the instruction: exact bg color for flat backgrounds, "keep the
+    visible background unchanged" for textured ones. Anchoring is critical —
+    without it the edit model re-invents the background (wrong color).
+    """
     element_names = [e.name for e in graph.elements]
+    if bg_info and bg_info.get("color") is not None:
+        bg_type = "flat" if bg_info.get("is_flat") else "textured"
+        r, g, b = bg_info["color"]
+        bg_color = f"RGB({r},{g},{b})"
+    else:
+        bg_type = "textured"
+        bg_color = "unknown"
+
     system_prompt = BACKGROUND_PROMPT_WRITER_PROMPT
     system_prompt = system_prompt.replace(
         "{element_names}", json.dumps(element_names))
+    system_prompt = system_prompt.replace("{bg_type}", bg_type)
+    system_prompt = system_prompt.replace("{bg_color}", bg_color)
     system_prompt = system_prompt.replace(
         "{defects}", json.dumps(defects) if defects else "[]")
 
@@ -442,27 +458,87 @@ def _verify_background(graph: SceneGraph, original_img: Image.Image,
     )
 
 
-def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
-    """Stage 3: Extract background with retry loop."""
+def extract_background(graph: SceneGraph, logger: RunLogger,
+                       method: str = "classic") -> None:
+    """Stage 3: Extract background — classical fill (default) or model route.
+
+    Routes:
+      classic (default): analyze the background classically; if it is
+        verifiably flat, fill the (dilated color-outlier ∪ padded-bbox-union)
+        region with the measured background color — instant, pixel-exact, no
+        model. Falls back to the model route when the background is not flat
+        or the verifier rejects the fill.
+      model: VLM-written, color-anchored prompt + Qwen-Image-2.1 edit with
+        the verify-retry loop (defects fed back into the next prompt).
+    """
     print("\n" + "=" * 60)
     print("STAGE 3 — BACKGROUND EXTRACTION")
     print("=" * 60)
 
     graph.background.status = BackgroundStatus.GENERATING
-    original_img = Image.open(graph.image_path)
+    original_img = Image.open(graph.image_path).convert("RGB")
     t_bg = time.time()
-    print("  [bg] background extraction started")
+    print(f"  [bg] background extraction started (method={method})")
 
+    # --- Classical background analysis (used by both routes) ---
+    bboxes = [e.bbox for e in graph.elements]
+    bg_info = pipeline_tools.estimate_background(original_img, bboxes)
+    logger.log_text(json.dumps(bg_info), label="bg_analysis")
+    print(f"  [bg] analysis: color={bg_info['color']} "
+          f"flat_frac={bg_info['flat_frac']} is_flat={bg_info['is_flat']}")
+
+    fallback_defects: list[str] = []
+
+    # --- Route 1: classical fill ---
+    if method == "classic" and bg_info["is_flat"] and bg_info["color"] is not None:
+        try:
+            t_c = time.time()
+            filled, _fill_mask = pipeline_tools.classic_background_fill(
+                original_img, bboxes, bg_info["color"])
+            classic_path = logger.run_dir / "background_classic.png"
+            filled.save(classic_path)
+            logger.save_image(filled, "bg_classic")
+            print(f"  [bg] classic fill done in {time.time() - t_c:.1f}s -> {classic_path}")
+
+            # Verify once; rejection means fragments survived (e.g. an object
+            # colored like the bg, outside its bbox) -> fall back to the model.
+            verification = _verify_background(graph, original_img, filled, logger)
+            ok = verification.get("ok", False)
+            defects = verification.get("defects", [])
+            notes = verification.get("notes", "")
+            print(f"  [bg] classic fill verification: ok={ok}, defects={defects}, notes={notes}")
+
+            if ok:
+                graph.background.image_path = str(classic_path)
+                graph.background.prompt = None
+                graph.background.status = BackgroundStatus.DONE
+                graph.background.attempts = 1
+                graph.background.defects = []
+                graph.background.method = "classic_fill"
+                print(f"  >>> Background DONE (classic fill, total {_fmt_duration(time.time() - t_bg)})")
+                logger.save_scene_graph(graph, "stage3_background")
+                return
+
+            print("  [bg] classic fill REJECTED by verifier — falling back to model route")
+            fallback_defects = defects or ["leftover_object"]
+
+        except Exception as e:
+            print(f"  [bg] classic fill FAILED ({e}) — falling back to model route")
+            traceback.print_exc()
+    elif method == "classic":
+        print("  [bg] background is not verifiably flat — using the model route")
+
+    # --- Route 2: model generation (anchored prompt + retry loop) ---
     best_bg = None
-    best_defects = None
+    best_defects = fallback_defects or None
 
     for attempt in range(1, BACKGROUND_RETRIES + 1):
-        print(f"\n  [bg] Attempt {attempt}/{BACKGROUND_RETRIES} started")
+        print(f"\n  [bg] model attempt {attempt}/{BACKGROUND_RETRIES} started")
         t_att = time.time()
 
-        # Write prompt
+        # Write prompt (color-anchored; seeded with classic-fill defects, if any)
         defects_for_prompt = best_defects if best_defects else []
-        bg_prompt = _write_background_prompt(graph, defects_for_prompt, logger)
+        bg_prompt = _write_background_prompt(graph, defects_for_prompt, logger, bg_info)
         graph.background.prompt = bg_prompt
         print(f"  Background prompt: {bg_prompt[:120]}...")
 
@@ -502,6 +578,7 @@ def extract_background(graph: SceneGraph, logger: RunLogger) -> None:
         best_bg.save(bg_path)
         graph.background.image_path = str(bg_path)
         graph.background.defects = best_defects or []
+        graph.background.method = "model"
         if best_defects:
             graph.background.status = BackgroundStatus.FAILED
             print("  >>> Background FAILED after retries")
@@ -911,7 +988,8 @@ def ship(graph: SceneGraph, logger: RunLogger) -> dict:
 # ---------------------------------------------------------------------------
 def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
                  use_fake: bool = False, use_verify: bool = False,
-                 use_global: bool = False) -> dict:
+                 use_global: bool = False,
+                 bg_method: str | None = None) -> dict:
     """Run the full layer decomposition pipeline on one image.
 
     Args:
@@ -922,10 +1000,16 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
             element cutout (slower, higher quality).
         use_global: if True, run the final global reconstruction verification
             and re-routing loop.
+        bg_method: Stage-3 background method — "classic" (default: classical
+            color fill when the bg is verifiably flat, model fallback) or
+            "model" (VLM-written color-anchored prompt + Qwen edit).
+            None -> config.BACKGROUND_METHOD.
 
     Returns:
         dict with paths to all outputs.
     """
+    if bg_method is None:
+        bg_method = BACKGROUND_METHOD
     pipeline_tools.set_fake_mode(use_fake)
     if use_fake:
         print("[PIPELINE] RUNNING IN FAKE/STUB MODE — no real model calls")
@@ -943,6 +1027,9 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
 
     if use_global:
         print("Global verification ENABLED — final reconstruction is re-checked.")
+
+    print(f"[PIPELINE] Background method: {bg_method} "
+          f"(classic = classical fill + model fallback)")
 
     # Derive image prefix from basename (e.g. "009" from "009.png")
     image_stem = Path(image_path).stem
@@ -969,7 +1056,7 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
 
             # Stage 3
             t_stage = time.time()
-            extract_background(graph, logger)
+            extract_background(graph, logger, method=bg_method)
             print(f"\n[PIPELINE] Stage 3 (background) finished in {_fmt_duration(time.time() - t_stage)} "
                   f"(elapsed {_fmt_duration(time.time() - t_run)})")
 
