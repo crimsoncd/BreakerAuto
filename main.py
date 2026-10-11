@@ -9,8 +9,8 @@ Usage:
     # Run in fake/stub mode for testing (no GPUs needed)
     python main.py --image images/009.png --fake
 
-    # Enable the per-element VLM verification loop
-    python main.py --image images/009.png --use_verify
+    # Disable the (default) decider verification gate
+    python main.py --image images/009.png --skip_verify
 
     # Batch process all images in a directory
     python main.py --dir images/ --output runs
@@ -122,8 +122,15 @@ def main():
         help="Run in fake/stub mode without real model calls"
     )
     parser.add_argument(
-        "--use_verify", action="store_true",
-        help="Enable VLM verification of each extracted element (default: skipped for speed)."
+        "--use_verify", dest="use_verify", action="store_true", default=True,
+        help="(Default: on) Decider verification gate: cheap yes/no checks on each "
+             "generated element cutout and background; failures trigger a VLM "
+             "diagnose-and-rewrite retry. Kept for backward compatibility "
+             "(the gate is on unless --skip_verify is given)."
+    )
+    parser.add_argument(
+        "--skip_verify", dest="use_verify", action="store_false",
+        help="Disable the decider verification gate (no verification at all)."
     )
     parser.add_argument(
         "--use_global", action="store_true",

@@ -59,6 +59,30 @@ class RunLogger:
             json.dump(data, f, indent=2, ensure_ascii=False)
         return path
 
+    def log_decider_call(self, role: str, state_text: str, questions: dict,
+                          scores: dict, failed: list, ok: bool) -> Path:
+        """Log a decider (Decisions API) call: questions, scores, verdict."""
+        path = self.run_dir / f"{self._next_step(f'decider_{role}')}.json"
+        data = {
+            "role": role,
+            "state_text": state_text,
+            "questions": {
+                qid: {
+                    "instructions": spec["instructions"],
+                    "true": spec["true"],
+                    "false": spec["false"],
+                    "fail_if_below": spec.get("fail_if_below", True),
+                }
+                for qid, spec in questions.items()
+            },
+            "scores": scores,
+            "failed_questions": failed,
+            "ok": ok,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return path
+
     def log_image_pair(self, ref: Image.Image, result: Image.Image,
                        label: str = "compare") -> tuple[Path, Path]:
         """Log a reference-result image pair for verification."""

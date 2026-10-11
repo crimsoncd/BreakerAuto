@@ -12,6 +12,9 @@
 # --- VLM API client (Bailian / DashScope OpenAI-compatible endpoint) ---
 openai
 
+# --- Decider (OpenRouter Decisions API) verification gate ---
+requests
+
 torch>=2.8.0
 torchvision
 diffusers>=0.41.0

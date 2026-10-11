@@ -45,12 +45,15 @@ from prompts import (
     BACKGROUND_VERIFIER_PROMPT, BACKGROUND_VERIFIER_TEXT,
     GLOBAL_VERIFIER_PROMPT, GLOBAL_VERIFIER_TEXT,
     DESCRIBER_PROMPT,
+    element_decider_questions, background_decider_questions,
+    ELEMENT_RETRY_WRITER_PROMPT, ELEMENT_RETRY_WRITER_TEXT,
+    BACKGROUND_RETRY_WRITER_PROMPT, BACKGROUND_RETRY_WRITER_TEXT,
 )
 from logger import RunLogger
 import pipeline_tools
 from pipeline_tools import (
     vlm, qwen_edit, crop, matte_to_alpha, resize, composite,
-    vlm_json, parse_json_relaxed,
+    vlm_json, parse_json_relaxed, run_decider,
     resize_layer_to_bbox, denorm_bbox_pixels,
     _denorm_bbox,
 )
@@ -65,6 +68,14 @@ def _fmt_duration(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(int(seconds), 60)
     return f"{minutes}m {secs:02d}s"
+
+
+# Decider question ids -> human-readable defect labels stored in the
+# SceneGraph (kept in the spirit of the legacy defect categories).
+_ELEMENT_DEFECT_LABELS = {
+    "only_target": "not_only_target",        # contamination / wrong object
+    "clean_rendering": "distorted_or_bad_color",  # distortion / bizarre colors
+}
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +240,53 @@ def _write_isolation_prompt(element: Element, contaminants: list[str],
     return prompt_text
 
 
+def _write_element_retry_prompt(element: Element, contaminants: list[str],
+                                 failed_checks: list[str], previous_prompt: str | None,
+                                 original_crop: Image.Image, failed_image: Image.Image,
+                                 logger: RunLogger) -> str:
+    """Stage 2, retry: MULTIMODAL diagnose-and-rewrite of the isolation prompt.
+
+    Called only after the decider gate fails an attempt: the VLM sees the
+    ORIGINAL crop and the FAILED generation, plus the previous instruction
+    and which checks failed, and writes the next isolation prompt itself —
+    far more actionable than the text-only P3 template because it can point
+    at the contamination/distortion it actually sees.
+    """
+    system_prompt = ELEMENT_RETRY_WRITER_PROMPT
+    system_prompt = system_prompt.replace("{name}", element.name)
+    system_prompt = system_prompt.replace(
+        "{failed_checks}", json.dumps(failed_checks) if failed_checks else "[]")
+    system_prompt = system_prompt.replace(
+        "{contaminants}", json.dumps(contaminants) if contaminants else "[]")
+    system_prompt = system_prompt.replace(
+        "{previous_prompt}", previous_prompt or "(none)")
+
+    user_text = ELEMENT_RETRY_WRITER_TEXT
+
+    if pipeline_tools.FAKE_MODE:
+        response_text = pipeline_tools._fake_vlm(system_prompt,
+                                  [original_crop, failed_image], user_text)
+        result = parse_json_relaxed(response_text) or {}
+        prompt_text = result.get("prompt", f"isolate the {element.name} on plain background")
+        logger.log_text(prompt_text, label=f"prompt_{element.id}")
+        return prompt_text
+
+    result = vlm_json(
+        system_prompt=system_prompt,
+        image_input=[original_crop, failed_image],
+        user_text=user_text,
+        max_new_tokens=VLM_MAX_TOKENS_PROMPT_WRITER,
+        role=f"retry_writer_{element.id}",
+        logger=logger,
+    )
+    prompt_text = result.get("prompt", f"isolate the {element.name} on plain background")
+    logger.log_text(prompt_text, label=f"prompt_{element.id}")
+    return prompt_text
+
+
+# Legacy VLM verifier — kept for reference, no longer called by the default
+# pipeline: the decider gate (pipeline_tools.run_decider) replaced it. The
+# expensive VLM only sees a failure via the retry-writer prompts (P9/P10).
 def _verify_element(element: Element, original_crop: Image.Image,
                     result_cutout: Image.Image, logger: RunLogger) -> dict:
     """Stage 2, step 5: Verify element cutout."""
@@ -280,22 +338,37 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
     best_result = None
     best_defects = None
     best_attempt = 0
+    best_confidence: float | None = None
+    prev_prompt: str | None = None
+    failed_checks: list[str] = []
+    failed_image: Image.Image | None = None   # last failed generation, for the retry writer
 
     for attempt in range(1, ELEMENT_RETRIES + 1):
         print(f"\n  [el {element.id}] Attempt {attempt}/{ELEMENT_RETRIES} started")
         t_att = time.time()
 
-        # Step 3: Write isolation prompt
-        print(f"  [el {element.id}] Step 3/6 writing isolation prompt (attempt {attempt}/{ELEMENT_RETRIES})...")
-        defects_for_prompt = []
-        if best_defects:
-            defects_for_prompt = best_defects
-        isolation_prompt = _write_isolation_prompt(
-            element, contaminants, defects_for_prompt, logger)
+        # Step 3: Write isolation prompt. Attempt 1 (and any attempt without
+        # a verified failure to look at) uses the text-only P3 writer;
+        # attempts after a decider-verified failure use the MULTIMODAL retry
+        # writer, which sees the original crop + the failed generation and
+        # diagnoses the actual problem.
+        if attempt > 1 and failed_image is not None:
+            print(f"  [el {element.id}] Step 3/6 writing retry prompt (multimodal diagnose-and-rewrite)...")
+            isolation_prompt = _write_element_retry_prompt(
+                element, contaminants, failed_checks, prev_prompt,
+                crop_img, failed_image, logger)
+        else:
+            print(f"  [el {element.id}] Step 3/6 writing isolation prompt (attempt {attempt}/{ELEMENT_RETRIES})...")
+            defects_for_prompt = best_defects or element.defects or []
+            isolation_prompt = _write_isolation_prompt(
+                element, contaminants, defects_for_prompt, logger)
         element.isolation_prompt = isolation_prompt
+        prev_prompt = isolation_prompt
         print(f"  [el {element.id}] Step 3/6 isolation prompt: {isolation_prompt[:80]}...")
 
         # Step 4: Generate with the Qwen-Image-2.1 edit model
+        # (the seed is bumped per attempt: same prompt + same seed would
+        # reproduce the same bad image)
         seed = QWEN_EDIT_BASE_SEED + attempt
         gen_out_path = logger.run_dir / f"edit_{element.id}_attempt{attempt}.png"
         print(f"  [el {element.id}] Step 4/6 Qwen edit generation (attempt {attempt}/{ELEMENT_RETRIES}, seed={seed})...")
@@ -310,34 +383,56 @@ def extract_element(element: Element, graph: SceneGraph, logger: RunLogger, use_
             print(f"  [el {element.id}] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — edit generation failed")
             continue
 
-        # Step 5: Matte to alpha
-        print(f"  [el {element.id}] Step 5/6 matting to alpha + resize to bbox...")
+        # Step 5: Verify — decider gate on the GENERATED image (pre-matting:
+        # both real failure modes — contamination and distortion — are
+        # visible there; RGBA also renders inconsistently for judges, and a
+        # failed attempt never wastes matte work). Two noul questions:
+        # only_target / clean_rendering. A fail triggers the multimodal
+        # retry writer on the next attempt.
+        if not use_verify:
+            print(f"  [el {element.id}] Step 5/6 verification skipped (--skip_verify)")
+            verification = {"ok": True, "failed": [], "scores": {}, "confidence": None}
+        else:
+            print(f"  [el {element.id}] Step 5/6 decider verification of generated image...")
+            verification = run_decider(
+                generated,
+                element_decider_questions(element.name),
+                state_text=(f"This image was generated to show ONLY: {element.name}. "
+                            f"Judge whether it is usable as a clean standalone cutout."),
+                role=f"verify_{element.id}",
+                logger=logger,
+            )
+        ok = verification.get("ok", False)
+        confidence = verification.get("confidence")
+        failed_checks = verification.get("failed", [])
+        print(f"  [el {element.id}] Step 5/6 verification result: ok={ok}, "
+              f"failed={failed_checks}, scores={ {k: round(v, 3) for k, v in verification.get('scores', {}).items()} }")
+
+        # Step 6: Matte to alpha + resize
+        print(f"  [el {element.id}] Step 6/6 matting to alpha + resize to bbox...")
         rgba_layer = matte_to_alpha(generated)
         matte_path = logger.save_image(rgba_layer, f"matte_{element.id}_att{attempt}")
 
         # Resize to bbox dimensions
         rgba_resized = resize_layer_to_bbox(rgba_layer, element.bbox, w, h)
 
-        # Step 6: Verify
-        if not use_verify:
-            print(f"  [el {element.id}] Step 6/6 verification skipped (--use_verify not set)")
-            verification = {"ok": True, "defects": None, "notes": None}
-        else:
-            print(f"  [el {element.id}] Step 6/6 verifying cutout against original crop...")
-            verification = _verify_element(element, crop_img, rgba_resized, logger)
-        ok = verification.get("ok", False)
-        defects = verification.get("defects", [])
-        notes = verification.get("notes", "")
-
-        print(f"  [el {element.id}] Step 6/6 verification result: ok={ok}, defects={defects}, notes={(notes or '')[:80]}")
-
-        # Track best
-        if best_result is None or ok:
+        # Track best attempt by decider confidence. An ok attempt always
+        # scores >= the tolerance band and a failed one always below it, so
+        # pure max-confidence prefers ok attempts automatically. When the
+        # gate is disabled (confidence None) the first attempt is kept,
+        # matching the old behavior.
+        if (best_result is None
+                or (confidence is not None
+                    and (best_confidence is None or confidence > best_confidence))):
             best_result = rgba_resized
-            best_defects = defects
+            best_defects = [_ELEMENT_DEFECT_LABELS.get(c, c) for c in failed_checks]
             best_attempt = attempt
+            best_confidence = confidence
             element.layer_path = str(matte_path)
-            element.defects = defects
+            element.defects = best_defects
+
+        # Remember the failure so the next attempt's retry writer can see it
+        failed_image = generated if not ok else None
 
         print(f"  [el {element.id}] attempt {attempt} finished in {_fmt_duration(time.time() - t_att)}")
         if ok:
@@ -434,6 +529,9 @@ def _write_background_prompt(graph: SceneGraph, defects: list[str],
     return prompt_text
 
 
+# Legacy VLM background verifier — kept for reference, no longer called by
+# the default pipeline: the decider gate (see _decider_verify_background)
+# replaced it.
 def _verify_background(graph: SceneGraph, original_img: Image.Image,
                        bg_result: Image.Image, logger: RunLogger) -> dict:
     """Stage 3: Verify background."""
@@ -458,8 +556,80 @@ def _verify_background(graph: SceneGraph, original_img: Image.Image,
     )
 
 
+def _decider_verify_background(graph: SceneGraph, bg_result: Image.Image,
+                               logger: RunLogger) -> dict:
+    """Stage 3: decider verification gate for an extracted background.
+
+    One noul question — `no_foreground` — judged on the single background
+    image (no reference needed: `leftover_object` is the dominant real
+    failure and is visible on the result alone).
+    """
+    element_names = [e.name for e in graph.elements]
+    return run_decider(
+        bg_result,
+        background_decider_questions(element_names),
+        state_text=("This image should be the extracted BACKGROUND of an illustration: "
+                    "no foreground objects (or their fragments, ghosts, or outlines) "
+                    "should remain anywhere in it."),
+        role="verify_bg",
+        logger=logger,
+    )
+
+
+def _write_background_retry_prompt(graph: SceneGraph, bg_info: dict | None,
+                                   previous_prompt: str | None,
+                                   original_img: Image.Image,
+                                   failed_image: Image.Image,
+                                   logger: RunLogger) -> str:
+    """Stage 3 (model route), retry: MULTIMODAL diagnose-and-rewrite.
+
+    Called only after the decider gate fails a background attempt: the VLM
+    sees the ORIGINAL and the FAILED background, plus the previous
+    instruction, and writes the next color-ANCHORED removal prompt, naming
+    the objects that actually remain.
+    """
+    element_names = [e.name for e in graph.elements]
+    if bg_info and bg_info.get("color") is not None:
+        bg_type = "flat" if bg_info.get("is_flat") else "textured"
+        r, g, b = bg_info["color"]
+        bg_color = f"RGB({r},{g},{b})"
+    else:
+        bg_type = "textured"
+        bg_color = "unknown"
+
+    system_prompt = BACKGROUND_RETRY_WRITER_PROMPT
+    system_prompt = system_prompt.replace(
+        "{element_names}", json.dumps(element_names))
+    system_prompt = system_prompt.replace("{bg_type}", bg_type)
+    system_prompt = system_prompt.replace("{bg_color}", bg_color)
+    system_prompt = system_prompt.replace(
+        "{previous_prompt}", previous_prompt or "(none)")
+
+    user_text = BACKGROUND_RETRY_WRITER_TEXT
+
+    if pipeline_tools.FAKE_MODE:
+        response_text = pipeline_tools._fake_vlm(system_prompt,
+                                  [original_img, failed_image], user_text)
+        result = parse_json_relaxed(response_text) or {}
+        prompt_text = result.get("prompt", "remove all foreground objects, fill the background")
+        logger.log_text(prompt_text, label="prompt_background")
+        return prompt_text
+
+    result = vlm_json(
+        system_prompt=system_prompt,
+        image_input=[original_img, failed_image],
+        user_text=user_text,
+        max_new_tokens=VLM_MAX_TOKENS_PROMPT_WRITER,
+        role="bg_retry_writer",
+        logger=logger,
+    )
+    prompt_text = result.get("prompt", "remove all foreground objects, fill the background")
+    logger.log_text(prompt_text, label="prompt_background")
+    return prompt_text
+
+
 def extract_background(graph: SceneGraph, logger: RunLogger,
-                       method: str = "classic") -> None:
+                       method: str = "classic", use_verify: bool = True) -> None:
     """Stage 3: Extract background — classical fill (default) or model route.
 
     Routes:
@@ -467,9 +637,10 @@ def extract_background(graph: SceneGraph, logger: RunLogger,
         verifiably flat, fill the (dilated color-outlier ∪ padded-bbox-union)
         region with the measured background color — instant, pixel-exact, no
         model. Falls back to the model route when the background is not flat
-        or the verifier rejects the fill.
+        or the decider gate rejects the fill (gated by `use_verify`).
       model: VLM-written, color-anchored prompt + Qwen-Image-2.1 edit with
-        the verify-retry loop (defects fed back into the next prompt).
+        the decider-verify retry loop (a fail triggers the multimodal
+        retry-writer on the next attempt).
     """
     print("\n" + "=" * 60)
     print("STAGE 3 — BACKGROUND EXTRACTION")
@@ -500,13 +671,18 @@ def extract_background(graph: SceneGraph, logger: RunLogger,
             logger.save_image(filled, "bg_classic")
             print(f"  [bg] classic fill done in {time.time() - t_c:.1f}s -> {classic_path}")
 
-            # Verify once; rejection means fragments survived (e.g. an object
-            # colored like the bg, outside its bbox) -> fall back to the model.
-            verification = _verify_background(graph, original_img, filled, logger)
-            ok = verification.get("ok", False)
-            defects = verification.get("defects", [])
-            notes = verification.get("notes", "")
-            print(f"  [bg] classic fill verification: ok={ok}, defects={defects}, notes={notes}")
+            # Verify once with the decider gate; rejection means fragments
+            # survived (e.g. an object colored like the bg, outside its
+            # bbox) -> fall back to the model route. Gated by use_verify:
+            # the pixel-exact flat fill ships directly without it.
+            if use_verify:
+                verification = _decider_verify_background(graph, filled, logger)
+                ok = verification.get("ok", False)
+                failed = verification.get("failed", [])
+                print(f"  [bg] classic fill verification: ok={ok}, failed={failed}")
+            else:
+                ok = True
+                print("  [bg] classic fill verification skipped (--skip_verify)")
 
             if ok:
                 graph.background.image_path = str(classic_path)
@@ -519,8 +695,8 @@ def extract_background(graph: SceneGraph, logger: RunLogger,
                 logger.save_scene_graph(graph, "stage3_background")
                 return
 
-            print("  [bg] classic fill REJECTED by verifier — falling back to model route")
-            fallback_defects = defects or ["leftover_object"]
+            print("  [bg] classic fill REJECTED by decider — falling back to model route")
+            fallback_defects = ["leftover_object"]
 
         except Exception as e:
             print(f"  [bg] classic fill FAILED ({e}) — falling back to model route")
@@ -531,18 +707,32 @@ def extract_background(graph: SceneGraph, logger: RunLogger,
     # --- Route 2: model generation (anchored prompt + retry loop) ---
     best_bg = None
     best_defects = fallback_defects or None
+    best_confidence: float | None = None
+    prev_prompt: str | None = None
+    failed_image: Image.Image | None = None   # last failed background, for the retry writer
 
     for attempt in range(1, BACKGROUND_RETRIES + 1):
         print(f"\n  [bg] model attempt {attempt}/{BACKGROUND_RETRIES} started")
         t_att = time.time()
 
-        # Write prompt (color-anchored; seeded with classic-fill defects, if any)
-        defects_for_prompt = best_defects if best_defects else []
-        bg_prompt = _write_background_prompt(graph, defects_for_prompt, logger, bg_info)
+        # Write prompt. Attempt 1 (or any attempt without a verified failure
+        # to look at) uses the text-only color-anchored P5 writer (seeded
+        # with classic-fill defects if the classic route was rejected);
+        # attempts after a decider-verified failure use the MULTIMODAL retry
+        # writer, which sees the original + the failed background.
+        if attempt > 1 and failed_image is not None:
+            print("  [bg] writing retry prompt (multimodal diagnose-and-rewrite)...")
+            bg_prompt = _write_background_retry_prompt(
+                graph, bg_info, prev_prompt, original_img, failed_image, logger)
+        else:
+            defects_for_prompt = best_defects if best_defects else []
+            bg_prompt = _write_background_prompt(graph, defects_for_prompt, logger, bg_info)
         graph.background.prompt = bg_prompt
+        prev_prompt = bg_prompt
         print(f"  Background prompt: {bg_prompt[:120]}...")
 
-        # Generate
+        # Generate (seed bumped per attempt: same prompt + same seed
+        # reproduces the same bad image)
         seed = QWEN_EDIT_BASE_SEED + attempt * 100
         bg_out_path = logger.run_dir / f"background_attempt{attempt}.png"
         if pipeline_tools.FAKE_MODE:
@@ -556,15 +746,32 @@ def extract_background(graph: SceneGraph, logger: RunLogger,
             print(f"  [bg] attempt {attempt} aborted after {_fmt_duration(time.time() - t_att)} — generation failed")
             continue
 
-        # Verify
-        verification = _verify_background(graph, original_img, generated, logger)
+        # Verify — decider gate ("no foreground object left"); a fail
+        # triggers the multimodal retry writer on the next attempt.
+        if not use_verify:
+            print("  [bg] verification skipped (--skip_verify)")
+            verification = {"ok": True, "failed": [], "scores": {}, "confidence": None}
+        else:
+            print("  [bg] decider verification of generated background...")
+            verification = _decider_verify_background(graph, generated, logger)
         ok = verification.get("ok", False)
-        defects = verification.get("defects", [])
-        notes = verification.get("notes", "")
-        print(f"  Background verification: ok={ok}, defects={defects}, notes={notes}")
+        confidence = verification.get("confidence")
+        failed = verification.get("failed", [])
+        print(f"  [bg] verification result: ok={ok}, failed={failed}, "
+              f"scores={ {k: round(v, 3) for k, v in verification.get('scores', {}).items()} }")
 
-        best_bg = generated
-        best_defects = defects
+        # Track best attempt by decider confidence (ok beats failed
+        # automatically: a passed gate scores >= the tolerance band, a
+        # failed one below it). Without the gate, the first attempt is kept.
+        if (best_bg is None
+                or (confidence is not None
+                    and (best_confidence is None or confidence > best_confidence))):
+            best_bg = generated
+            best_defects = [] if ok else (fallback_defects or ["leftover_object"])
+            best_confidence = confidence
+
+        # Remember the failure so the next attempt's retry writer can see it
+        failed_image = generated if not ok else None
 
         print(f"  [bg] attempt {attempt} finished in {_fmt_duration(time.time() - t_att)}")
         if ok:
@@ -987,7 +1194,7 @@ def ship(graph: SceneGraph, logger: RunLogger) -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
-                 use_fake: bool = False, use_verify: bool = False,
+                 use_fake: bool = False, use_verify: bool = True,
                  use_global: bool = False,
                  bg_method: str | None = None) -> dict:
     """Run the full layer decomposition pipeline on one image.
@@ -995,11 +1202,15 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
     Args:
         image_path: path to the illustration image.
         output_dir: where to write the run folder.
-        use_fake: if True, use stubs for VLM and the edit model (testing only).
-        use_verify: if True, run the VLM verification loop on each extracted
-            element cutout (slower, higher quality).
+        use_fake: if True, use stubs for VLM, the edit model, and the
+            decider (testing only).
+        use_verify: if True (default), run the decider verification gate on
+            each generated element cutout and background: two cheap noul
+            questions via the OpenRouter Decisions API; a fail triggers a
+            multimodal VLM diagnose-and-rewrite of the retry prompt. Turn
+            off with --skip_verify.
         use_global: if True, run the final global reconstruction verification
-            and re-routing loop.
+            and re-routing loop (still VLM-based, off by default).
         bg_method: Stage-3 background method — "classic" (default: classical
             color fill when the bg is verifiably flat, model fallback) or
             "model" (VLM-written color-anchored prompt + Qwen edit).
@@ -1023,7 +1234,8 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
         pipeline_tools.resolve_edit_device()
 
     if use_verify:
-        print("Element verification ENABLED — VLM checks each extracted cutout.")
+        print("Verification ENABLED — decider gate (OpenRouter Decisions API) checks "
+              "each generated cutout/background; VLM diagnose-and-rewrite on failure.")
 
     if use_global:
         print("Global verification ENABLED — final reconstruction is re-checked.")
@@ -1056,7 +1268,7 @@ def run_pipeline(image_path: str | Path, output_dir: str = DEFAULT_OUTPUT_DIR,
 
             # Stage 3
             t_stage = time.time()
-            extract_background(graph, logger, method=bg_method)
+            extract_background(graph, logger, method=bg_method, use_verify=use_verify)
             print(f"\n[PIPELINE] Stage 3 (background) finished in {_fmt_duration(time.time() - t_stage)} "
                   f"(elapsed {_fmt_duration(time.time() - t_run)})")
 

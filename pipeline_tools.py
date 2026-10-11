@@ -30,11 +30,13 @@ import numpy as np
 from PIL import Image
 
 from call_bailian_vlm import BailianVLM_inference
+from call_decider import decide as _decider_call
 from call_qwen_edit import QwenEdit
 from config import (
     BBOX_NORM, QWEN_EDIT_BASE_SEED,
     QWEN_EDIT_DEVICE as _QWEN_EDIT_DEVICE,
     BG_COLOR_TOL, BG_FLAT_MIN_FRAC, BG_FILL_DILATE_IT, BG_FILL_PAD,
+    DECIDER_FAIL_MAX, DECIDER_OK_MIN,
 )
 
 import rembg
@@ -236,6 +238,91 @@ def vlm(system_prompt: str, image_input, user_text: str,
             response=response,
         )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Tool 1b: Decider (OpenRouter Decisions API — fast verification gate)
+# ---------------------------------------------------------------------------
+def run_decider(image, questions: dict, state_text: str,
+                role: str = "decider", logger=None) -> dict:
+    """Run the decider verification gate on one image.
+
+    Args:
+        image: the image to judge (path or PIL Image) — the pipeline's
+            default usage is a SINGLE image (the Qwen-edit output, before
+            matting; both real failure modes — contamination and distortion
+            — are visible on it).
+        questions: {qid: {"instructions", "true", "false", "fail_if_below"}}
+            where "true"/"false" are the criteria descriptions of each noul
+            question and "fail_if_below" sets the failure direction:
+              True  -> question is GOOD when high; FAILS when score <
+                       DECIDER_FAIL_MAX  (e.g. "shows exactly one {name}").
+              False -> question is BAD when high; FAILS when score >
+                       DECIDER_OK_MIN    (e.g. "badly distorted").
+            Scores in the [DECIDER_FAIL_MAX, DECIDER_OK_MIN] band count as
+            "didn't fail" on purpose (tolerance for ambiguous verdicts).
+        state_text: context text sent ahead of the image.
+        role: label for logging.
+        logger: RunLogger; every call (question specs + scores + verdict)
+            is logged to the run folder.
+
+    Returns:
+        {"ok": bool, "failed": [qid, ...], "scores": {qid: float},
+         "confidence": float}
+        confidence in [0, 1] = min over questions of the "goodness" score
+        (usable for best-attempt bookkeeping). If the API is unreachable
+        (or FAKE_MODE off-path errors), returns ok=True with
+        confidence=1.0 — a flaky gate must never block the pipeline.
+    """
+    if FAKE_MODE:
+        scores = {
+            qid: 0.99 if spec.get("fail_if_below", True) else 0.01
+            for qid, spec in questions.items()
+        }
+    else:
+        print(f"[Decider] {role}: sending request "
+              f"({len(questions)} question(s))...")
+        t0 = time.time()
+        scores = _decider_call(
+            state_text=state_text,
+            questions={
+                qid: {"instructions": spec["instructions"],
+                      "true": spec["true"],
+                      "false": spec["false"]}
+                for qid, spec in questions.items()
+            },
+            image_input=image,
+        )
+        if scores is not None:
+            print(f"[Decider] {role}: scores received in {time.time() - t0:.1f}s: "
+                  f"{ {k: round(v, 3) for k, v in scores.items()} }")
+
+    if scores is None:  # API unavailable — treat as pass
+        scores, failed = {}, []
+        ok, confidence = True, 1.0
+    else:
+        failed = []
+        goodness = []
+        for qid, score in scores.items():
+            if questions[qid].get("fail_if_below", True):
+                good = score
+                if score < DECIDER_FAIL_MAX:
+                    failed.append(qid)
+            else:
+                good = 1.0 - score
+                if score > DECIDER_OK_MIN:
+                    failed.append(qid)
+            goodness.append(max(0.0, min(1.0, good)))
+        ok = not failed
+        confidence = min(goodness) if goodness else 1.0
+
+    result = {"ok": ok, "failed": failed, "scores": scores, "confidence": confidence}
+    if logger:
+        logger.log_decider_call(
+            role=role, state_text=state_text, questions=questions,
+            scores=scores, failed=failed, ok=ok,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

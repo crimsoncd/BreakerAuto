@@ -242,3 +242,121 @@ Write concise, factual text:
 
 Return STRICT JSON:
 {"description":"...","background":{"name":"...","description":"..."},"global_style":{"color_scheme":"...","mood":"..."},"elements":[{"id":"<exact id from the list>","description":"..."}, ...]}"""
+
+
+# ---------------------------------------------------------------------------
+# D1 — Decider questions: element cutout (fast verification gate)
+# ---------------------------------------------------------------------------
+def element_decider_questions(name: str) -> dict:
+    """Two noul questions for the decider gate on a generated element cutout.
+
+    The two REAL dominant failure modes (from actual runs):
+      1. other items not cleaned out of the crop (contamination);
+      2. distortion / bizarre colors (the edit model sometimes emits them).
+    Both are visible on the single generated image (pre-matting), so the
+    gate judges ONE image with these two questions.
+    """
+    return {
+        "only_target": {
+            "instructions": f"Does this image show exactly one {name} and nothing else?",
+            "true": f"The image shows exactly one {name} and no other object, fragment, or outline.",
+            "false": f"The image shows something else besides the {name}, or does not show a {name} at all.",
+            "fail_if_below": True,  # good when high; fail if score < DECIDER_FAIL_MAX
+        },
+        "clean_rendering": {
+            "instructions": ("Does this image have large areas of distortion, "
+                             "corruption, or bizarre unnatural colors?"),
+            "true": ("The image is badly distorted, corrupted, or has large "
+                     "areas of clearly unnatural, wrong-looking colors."),
+            "false": ("The image looks like a normal, cleanly rendered "
+                      "illustration object; minor style drift is acceptable."),
+            "fail_if_below": False,  # bad when high; fail if score > DECIDER_OK_MIN
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# D2 — Decider questions: extracted background (fast verification gate)
+# ---------------------------------------------------------------------------
+def background_decider_questions(element_names: list[str]) -> dict:
+    """Noul questions for the decider gate on an extracted background.
+
+    The background must show NO foreground object (or fragment/ghost) of
+    the removed elements. `leftover_object` is the dominant real failure.
+    """
+    names = ", ".join(element_names) if element_names else "the foreground objects"
+    return {
+        "no_foreground": {
+            "instructions": (f"Does this image contain only background, with none "
+                             f"of these foreground objects visible anywhere: {names}?"),
+            "true": ("The image is only background — none of the listed "
+                     "foreground objects, or their fragments, ghosts, or "
+                     "outlines, are visible."),
+            "false": ("At least one of the listed foreground objects (or a "
+                      "fragment/ghost/outline of it) is still visible in the "
+                      "image."),
+            "fail_if_below": True,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# P9 — Element Retry Prompt Writer (decider-triggered, MULTIMODAL)
+# ---------------------------------------------------------------------------
+# Called ONLY after the decider gate fails an attempt: the VLM sees the
+# original crop and the failed generation and writes the next isolation
+# prompt itself — much more actionable than the text-only P3 template,
+# because it can point at the actual contamination/distortion it sees.
+ELEMENT_RETRY_WRITER_PROMPT = """You write a single editing instruction for an image-edit model. A previous attempt FAILED and you see TWO images:
+1. REFERENCE: the original crop containing "{name}" (plus possibly other objects).
+2. FAILED ATTEMPT: the previous generation, which was supposed to be ONLY "{name}" on a plain flat background.
+
+Diagnosis of the failed attempt:
+- Failed checks: {failed_checks}
+  (only_target = other objects or fragments are still visible; clean_rendering = the image is distorted or has bizarre colors)
+- Target object: "{name}"
+- Objects to EXCLUDE (remove these): {contaminants}
+- The previous instruction (which produced the failure) was: {previous_prompt}
+
+Look at the FAILED ATTEMPT image, identify exactly what went wrong (which object or fragment leaked in, where; or what looks distorted), and write ONE new instruction that fixes it. Requirements:
+1. Names the target object to keep: "{name}".
+2. Names the specific objects/parts to remove — be concrete about WHAT leaked in (based on what you actually see in the FAILED ATTEMPT), not a generic "remove everything".
+3. Asks for the object to be COMPLETE and whole, with hidden parts naturally completed.
+4. Asks for a plain, flat, solid-color background.
+5. If the failure was distortion/bizarre colors, explicitly demand a clean, normal, well-rendered image matching the REFERENCE's colors and style.
+6. Do NOT simply repeat the previous instruction — it failed; change what needs changing.
+
+Return STRICT JSON:
+{"prompt":"<the single instruction>"}"""
+
+ELEMENT_RETRY_WRITER_TEXT = ("Diagnose the FAILED ATTEMPT (second image) against the "
+                             "REFERENCE (first image) and write a better isolation instruction.")
+
+
+# ---------------------------------------------------------------------------
+# P10 — Background Retry Prompt Writer (decider-triggered, MULTIMODAL)
+# ---------------------------------------------------------------------------
+# Called ONLY after the decider gate fails a background attempt: the VLM
+# sees the original and the failed background and writes the next,
+# still color-ANCHORED, background-removal prompt.
+BACKGROUND_RETRY_WRITER_PROMPT = """You write a single editing instruction for an image-edit model. A previous attempt FAILED and you see TWO images:
+1. REFERENCE: the original illustration.
+2. FAILED ATTEMPT: the intended background-only version, which still contains foreground objects or defects.
+
+Diagnosis of the failed attempt:
+- Failed check: no_foreground = at least one foreground object (or fragment/ghost/outline) is still visible — identify WHICH objects remain by comparing the two images.
+- Foreground objects to remove: {element_names}
+- Background analysis: {bg_type} ("flat" = a single solid background color; "textured" = real scenery/gradient)
+- Measured background color: {bg_color} (median color outside the element boxes; "unknown" if not measurable)
+- The previous instruction (which produced the failure) was: {previous_prompt}
+
+Write ONE new instruction that removes the REMAINING objects (name them concretely from what you see in the FAILED ATTEMPT) and keeps the ANCHORING rule:
+- If the background is flat: state the EXACT measured color (use {bg_color}) and demand the entire output be that flat solid color — no objects, no shadows, no outlines, no color drift.
+- If the background is textured: demand the already-visible background areas stay EXACTLY unchanged (same colors, texture, lighting and style) and that ONLY the removed object regions are filled, by extending the surrounding background naturally.
+Do NOT simply repeat the previous instruction — it failed; name what it missed.
+
+Return STRICT JSON:
+{"prompt":"<the single instruction>"}"""
+
+BACKGROUND_RETRY_WRITER_TEXT = ("Diagnose the FAILED ATTEMPT (second image) against the "
+                                "REFERENCE (first image) and write a better background instruction.")

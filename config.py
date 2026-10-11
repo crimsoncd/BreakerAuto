@@ -101,6 +101,42 @@ QWEN_EDIT_STEPS = 40
 # size before returning it.
 
 # ---------------------------------------------------------------------------
+# Decider configuration (OpenRouter Decisions API — fast verify gate)
+# ---------------------------------------------------------------------------
+# A cheap, low-latency "decision" model used as the default verification
+# gate for Stage-2 element cutouts and Stage-3 backgrounds (see
+# call_decider.py). It answers yes/no (noul) questions per image; the
+# expensive VLM is only called to diagnose-and-rewrite prompts AFTER the
+# decider flags a failure.
+
+# API endpoint. Env: DECIDER_API_URL
+DECIDER_API_URL = _from_env(
+    "DECIDER_API_URL", "https://openrouter.ai/api/alpha/decisions"
+)
+
+# API key. Env: OPENROUTER_API_KEY (normally loaded from .env at import time)
+DECIDER_API_KEY = _from_env("OPENROUTER_API_KEY", "")
+
+# Decisions model (must be a multimodal Decisions model). Env: DECIDER_MODEL
+DECIDER_MODEL = _from_env("DECIDER_MODEL", "perplexity/pplx-decider-v1.1-27b")
+
+# Optional OpenRouter attribution headers. Env: DECIDER_SITE_URL /
+# DECIDER_SITE_NAME (unset by default).
+DECIDER_SITE_URL = os.environ.get("DECIDER_SITE_URL", "")
+DECIDER_SITE_NAME = os.environ.get("DECIDER_SITE_NAME", "")
+
+# Transport: seconds per HTTP request, retries before giving up.
+DECIDER_TIMEOUT = 60
+DECIDER_MAX_RETRIES = 3
+DECIDER_RETRY_DELAY = 5  # seconds between retries
+
+# Confidence tolerance band. A noul score in [DECIDER_FAIL_MAX,
+# DECIDER_OK_MIN] counts as "didn't fail" — deliberately lenient to avoid
+# burning retries on ambiguous verdicts (speed/accuracy balance).
+DECIDER_FAIL_MAX = 0.35  # score BELOW this (for good-when-high questions) = fail
+DECIDER_OK_MIN = 0.65    # score ABOVE this (for bad-when-high questions) = fail
+
+# ---------------------------------------------------------------------------
 # Background extraction configuration
 # ---------------------------------------------------------------------------
 # Stage-3 method. Env: BACKGROUND_METHOD
